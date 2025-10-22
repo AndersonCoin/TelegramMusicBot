@@ -3,4 +3,4 @@
 __version__ = "2.1.0"
 __author__ = "Music Bot Team"
 
-# No imports here to avoid circular dependencies
+# Don't import anything here to avoid circular imports
