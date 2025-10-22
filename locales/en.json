@@ -1,1 +1,19 @@
-
+{
+    "start_text": "🎵 **Welcome to Music Bot!**\n\nI can play music in your group's voice chat.\nUse /help to see all commands.",
+    "help_text": "❓ **Help Menu**\n\n**/play <query/url>**: Play a song.\n**/pause**: Pause playback.\n**/resume**: Resume playback.\n**/skip**: Skip current song.\n**/stop**: Stop playback and clear queue.\n**/queue**: Show the queue.\n**/language**: Change language.",
+    "lang_changed": "✅ Language changed to English.",
+    "searching": "🔍 Searching...",
+    "downloading": "📥 Downloading...",
+    "starting_playback": "▶️ Starting playback...",
+    "now_playing": "▶️ **Now Playing:**\n{title}\n\n👤 **Requested by:** {requester}",
+    "added_to_queue": "✅ **Added to queue (#{position}):**\n{title}\n\n👤 **Requested by:** {requester}",
+    "paused": "⏸️ Paused.",
+    "resumed": "▶️ Resumed.",
+    "skipped": "⏭️ Skipped!",
+    "stopped": "⏹️ Stopped playback and cleared queue.",
+    "queue_empty": "📭 The queue is empty.",
+    "now_playing_title": "▶️ **Now Playing:**",
+    "queue_title": "📃 **Queue:**",
+    "admin_only": "❌ Only admins can perform this action!",
+    "bot_restarted_resuming": "🤖 Bot restarted. Resuming playback..."
+}
