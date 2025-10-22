@@ -13,13 +13,8 @@ from config import config
 logger = logging.getLogger(__name__)
 
 
-class StorageBackend(ABC):
-    """Abstract storage backend."""
-    
-    @abstractmethod
-    async def initialize(self) -> None:
-        """Initialize storage."""
-        pass
+class Storage(ABC):
+    """Abstract storage interface."""
     
     @abstractmethod
     async def get(self, key: str) -> Optional[Dict[str, Any]]:
@@ -27,12 +22,12 @@ class StorageBackend(ABC):
         pass
     
     @abstractmethod
-    async def set(self, key: str, value: Dict[str, Any]) -> None:
+    async def set(self, key: str, value: Dict[str, Any]) -> bool:
         """Set value for key."""
         pass
     
     @abstractmethod
-    async def delete(self, key: str) -> None:
+    async def delete(self, key: str) -> bool:
         """Delete key."""
         pass
     
@@ -42,69 +37,78 @@ class StorageBackend(ABC):
         pass
     
     @abstractmethod
-    async def clear(self) -> None:
+    async def clear(self) -> bool:
         """Clear all data."""
         pass
 
 
-class TinyDBBackend(StorageBackend):
-    """TinyDB storage backend."""
+class TinyDBStorage(Storage):
+    """TinyDB storage implementation."""
     
-    def __init__(self):
-        self.db_path = Path("data/db.json")
-        self.db: Optional[TinyDB] = None
-    
-    async def initialize(self) -> None:
-        """Initialize TinyDB."""
+    def __init__(self, db_path: str = "data/db.json"):
+        self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = TinyDB(self.db_path)
-        logger.info("TinyDB initialized")
+        self.table = self.db.table("states")
     
     async def get(self, key: str) -> Optional[Dict[str, Any]]:
         """Get value by key."""
-        if not self.db:
+        try:
+            Record = Query()
+            result = self.table.search(Record.key == key)
+            return result[0]["value"] if result else None
+        except Exception as e:
+            logger.error(f"Storage get error: {e}")
             return None
-        
-        Record = Query()
-        result = self.db.search(Record.key == key)
-        return result[0]["value"] if result else None
     
-    async def set(self, key: str, value: Dict[str, Any]) -> None:
+    async def set(self, key: str, value: Dict[str, Any]) -> bool:
         """Set value for key."""
-        if not self.db:
-            return
-        
-        Record = Query()
-        self.db.upsert({"key": key, "value": value}, Record.key == key)
+        try:
+            Record = Query()
+            self.table.upsert(
+                {"key": key, "value": value},
+                Record.key == key
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Storage set error: {e}")
+            return False
     
-    async def delete(self, key: str) -> None:
+    async def delete(self, key: str) -> bool:
         """Delete key."""
-        if not self.db:
-            return
-        
-        Record = Query()
-        self.db.remove(Record.key == key)
+        try:
+            Record = Query()
+            self.table.remove(Record.key == key)
+            return True
+        except Exception as e:
+            logger.error(f"Storage delete error: {e}")
+            return False
     
     async def get_all(self) -> List[Dict[str, Any]]:
         """Get all values."""
-        if not self.db:
+        try:
+            return [record["value"] for record in self.table.all()]
+        except Exception as e:
+            logger.error(f"Storage get_all error: {e}")
             return []
-        
-        return [record["value"] for record in self.db.all()]
     
-    async def clear(self) -> None:
+    async def clear(self) -> bool:
         """Clear all data."""
-        if self.db:
-            self.db.truncate()
+        try:
+            self.table.truncate()
+            return True
+        except Exception as e:
+            logger.error(f"Storage clear error: {e}")
+            return False
 
 
-def get_storage() -> StorageBackend:
-    """Get storage backend based on config."""
+def get_storage() -> Storage:
+    """Get storage instance based on config."""
     if config.STATE_BACKEND == "tinydb":
-        return TinyDBBackend()
+        return TinyDBStorage()
     else:
         # Default to TinyDB for MVP
-        return TinyDBBackend()
+        return TinyDBStorage()
 
 # Global storage instance
 storage = get_storage()
