@@ -1,36 +1,116 @@
+"""Playback control commands."""
+
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from bot.helpers.decorators import group_only, admin_only
+
+from bot.core.queue import queue_manager
 from bot.helpers.localization import get_text
-from bot.core.player import player
+
 
 @Client.on_message(filters.command("pause") & filters.group)
-@group_only
-@admin_only
 async def pause_command(client: Client, message: Message):
-    await player.pause(message.chat.id)
-    await message.reply(get_text(message.from_user.id, "paused"))
+    """Handle /pause command."""
+    from bot.core import player
+    
+    chat_id = message.chat.id
+    
+    # Check admin
+    member = await message.chat.get_member(message.from_user.id)
+    if not member.privileges:
+        await message.reply_text(get_text(message.chat, "admin_only"))
+        return
+    
+    if not player or not player.is_playing.get(chat_id):
+        await message.reply_text(get_text(message.chat, "not_in_call"))
+        return
+    
+    if await player.pause(chat_id):
+        await message.reply_text(get_text(message.chat, "paused"))
+    else:
+        await message.reply_text(get_text(message.chat, "error", message="Failed to pause"))
+
 
 @Client.on_message(filters.command("resume") & filters.group)
-@group_only
-@admin_only
 async def resume_command(client: Client, message: Message):
-    await player.resume(message.chat.id)
-    await message.reply(get_text(message.from_user.id, "resumed"))
+    """Handle /resume command."""
+    from bot.core import player
+    
+    chat_id = message.chat.id
+    
+    # Check admin
+    member = await message.chat.get_member(message.from_user.id)
+    if not member.privileges:
+        await message.reply_text(get_text(message.chat, "admin_only"))
+        return
+    
+    if not player or not player.is_playing.get(chat_id):
+        # Try to resume from saved state
+        from bot.persistence.state import StateManager
+        state_mgr = StateManager()
+        state = await state_mgr.get_state(chat_id)
+        
+        if state:
+            await message.reply_text(
+                get_text(message.chat, "resuming_from", position=state.position)
+            )
+            # Resume logic here
+        else:
+            await message.reply_text(get_text(message.chat, "nothing_to_resume"))
+        return
+    
+    if await player.resume(chat_id):
+        await message.reply_text(get_text(message.chat, "resumed"))
+    else:
+        await message.reply_text(get_text(message.chat, "error", message="Failed to resume"))
+
 
 @Client.on_message(filters.command("skip") & filters.group)
-@group_only
-@admin_only
 async def skip_command(client: Client, message: Message):
-    next_track = await player.skip(message.chat.id)
+    """Handle /skip command."""
+    from bot.core import player
+    
+    chat_id = message.chat.id
+    
+    # Check admin
+    member = await message.chat.get_member(message.from_user.id)
+    if not member.privileges:
+        await message.reply_text(get_text(message.chat, "admin_only"))
+        return
+    
+    if not player or not player.is_playing.get(chat_id):
+        await message.reply_text(get_text(message.chat, "not_in_call"))
+        return
+    
+    next_track = await player.skip(chat_id)
     if next_track:
-        await message.reply(get_text(message.from_user.id, "skipped"))
+        await message.reply_text(get_text(message.chat, "skipped"))
     else:
-        await message.reply(get_text(message.from_user.id, "queue_empty"))
+        await message.reply_text(get_text(message.chat, "queue_empty"))
+
 
 @Client.on_message(filters.command("stop") & filters.group)
-@group_only
-@admin_only
 async def stop_command(client: Client, message: Message):
-    await player.stop(message.chat.id)
-    await message.reply(get_text(message.from_user.id, "stopped"))
+    """Handle /stop command."""
+    from bot.core import player
+    
+    chat_id = message.chat.id
+    
+    # Check admin
+    member = await message.chat.get_member(message.from_user.id)
+    if not member.privileges:
+        await message.reply_text(get_text(message.chat, "admin_only"))
+        return
+    
+    if not player or not player.is_playing.get(chat_id):
+        await message.reply_text(get_text(message.chat, "not_in_call"))
+        return
+    
+    if await player.stop(chat_id):
+        await message.reply_text(get_text(message.chat, "stopped"))
+        
+        # Clear saved state
+        from bot.persistence.state import StateManager
+        state_mgr = StateManager()
+        await state_mgr.delete_state(chat_id)
+    else:
+        await message.reply_text(get_text(message.chat, "error", message="Failed to stop"))
