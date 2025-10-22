@@ -32,26 +32,5 @@ user_client = Client(
 # Initialize PyTgCalls
 call_client = PyTgCalls(user_client)
 
-# Global references for easy access
-bot: Optional[Client] = None
-assistant: Optional[Client] = None
-calls: Optional[PyTgCalls] = None
-
-async def initialize_clients():
-    """Initialize global client references and helpers."""
-    global bot, assistant, calls
-    bot = bot_client
-    assistant = user_client
-    calls = call_client
-    
-    # Start PyTgCalls
-    await calls.start()
-    
-    # Initialize assistant manager
-    from bot.helpers.assistant import AssistantManager
-    import bot.helpers.assistant as assistant_module
-    
-    assistant_module.assistant_manager = AssistantManager(bot, assistant)
-    await assistant_module.assistant_manager.initialize()
-    
-    logger.info("Clients initialized successfully")
+# Export for app.py
+app = bot_client  # Alias for compatibility
