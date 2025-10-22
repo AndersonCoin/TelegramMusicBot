@@ -91,6 +91,11 @@ async def start_bot() -> None:
     # Initialize clients
     await bot_client.start()
     await user_client.start()
+    # Initialize PyTgCalls after client starts
+from pytgcalls import PyTgCalls
+global call_client
+call_client = PyTgCalls(user_client)
+await call_client.start()
     await call_client.start()
     
     # Import here to avoid circular imports
