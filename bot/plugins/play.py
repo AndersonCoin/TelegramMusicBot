@@ -1,124 +1,140 @@
 """Play command and related functionality."""
 
 import asyncio
+import logging
 import time
+from typing import Dict
+
 from pyrogram import Client, filters
 from pyrogram.types import Message
+
 from bot.core.queue import queue_manager, Track
-from bot.helpers.youtube import YouTubeDownloader
+from bot.core.player import player
+from bot.helpers.assistant import assistant_manager
+from bot.helpers.formatting import formatting
+from bot.helpers.keyboards import keyboards
 from bot.helpers.localization import get_text
-from bot.helpers.keyboards import Keyboards
-from bot.helpers.formatting import format_duration, create_progress_bar
-from bot.helpers.assistant import AssistantManager
+from bot.helpers.youtube import youtube
+from config import config
+
+logger = logging.getLogger(__name__)
 
 # Rate limiting
-user_last_play: dict[int, float] = {}
+last_play_time: Dict[int, float] = {}
+
 
 @Client.on_message(filters.command("play") & filters.group)
 async def play_command(client: Client, message: Message):
     """Handle /play command."""
-    chat_id = message.chat.id
     user_id = message.from_user.id
+    chat_id = message.chat.id
     
     # Rate limiting
-    last_play = user_last_play.get(user_id, 0)
-    if time.time() - last_play < 3:
-        await message.reply(
-            get_text(user_id, "rate_limited", seconds=3)
-        )
-        return
-    user_last_play[user_id] = time.time()
+    current_time = time.time()
+    if user_id in last_play_time:
+        time_diff = current_time - last_play_time[user_id]
+        if time_diff < config.RATE_LIMIT_SECONDS:
+            await message.reply_text(
+                get_text(
+                    message.chat,
+                    "rate_limited",
+                    seconds=int(config.RATE_LIMIT_SECONDS - time_diff)
+                )
+            )
+            return
+    
+    last_play_time[user_id] = current_time
     
     # Get query
     if len(message.command) < 2:
-        await message.reply(get_text(user_id, "error_occurred", error="No query provided"))
+        await message.reply_text(get_text(message.chat, "invalid_url"))
         return
     
     query = " ".join(message.command[1:])
     
-    # Search message
-    status_msg = await message.reply(
-        get_text(user_id, "searching", query=query)
+    # Ensure assistant is in chat
+    if assistant_manager:
+        if not await assistant_manager.ensure_in_chat(message.chat):
+            await message.reply_text(get_text(message.chat, "error", message="Failed to add assistant"))
+            return
+    
+    # Search
+    search_msg = await message.reply_text(
+        get_text(message.chat, "searching", query=query)
     )
     
-    # Ensure assistant is ready
-    ready, msg = await AssistantManager.ensure_in_chat(client.music, chat_id)
-    if not ready:
-        await status_msg.edit(get_text(user_id, "error_occurred", error=msg))
+    result = await youtube.search(query)
+    if not result:
+        await search_msg.edit_text(get_text(message.chat, "invalid_url"))
         return
-    
-    # Search or get info
-    if query.startswith(("http://", "https://")):
-        info = await YouTubeDownloader.get_info(query)
-    else:
-        info = await YouTubeDownloader.search(query)
-    
-    if not info:
-        await status_msg.edit(get_text(user_id, "no_results", query=query))
-        return
-    
-    # Extract info
-    video_info = YouTubeDownloader.extract_info(info)
-    
-    # Update status
-    await status_msg.edit(
-        get_text(user_id, "downloading", title=video_info["title"])
-    )
     
     # Download
-    file_path, _ = await YouTubeDownloader.download(video_info["url"])
-    if not file_path:
-        await status_msg.edit(get_text(user_id, "error_occurred", error="Download failed"))
-        return
-    
-    # Create track
-    track = Track(
-        url=video_info["url"],
-        title=video_info["title"],
-        duration=video_info["duration"],
-        requester_id=user_id,
-        requester_name=message.from_user.first_name,
-        file_path=file_path,
-        thumbnail=video_info.get("thumbnail")
+    await search_msg.edit_text(
+        get_text(message.chat, "downloading", title=result["title"])
     )
     
+    download = await youtube.download(result["url"])
+    if not download or not download.get("file_path"):
+        await search_msg.edit_text(
+            get_text(message.chat, "download_error", error="Failed to download")
+        )
+        return
+    
     # Add to queue
+    track = Track(
+        id=download["id"],
+        title=download["title"],
+        duration=download["duration"],
+        url=download["url"],
+        file_path=download["file_path"],
+        thumbnail=download.get("thumbnail"),
+        requested_by=user_id,
+        requester_name=message.from_user.first_name
+    )
+    
     queue = queue_manager.get_queue(chat_id)
     position = queue.add(track)
     
-    # If first track, play immediately
-    if position == 1:
-        queue.current_index = 0
-        
-        # Join voice chat if needed
-        if chat_id not in client.music.player.active_chats:
-            await client.music.player.join(chat_id)
-        
-        # Play track
-        await client.music.player.play(chat_id, track)
-        
-        # Create now playing message
-        text = get_text(
-            user_id,
-            "now_playing",
-            title=track.title,
-            duration=format_duration(track.duration),
-            requester=track.requester_name,
-            progress_bar=create_progress_bar(0, track.duration),
-            elapsed=format_duration(0),
-            total=format_duration(track.duration)
-        )
-        
-        now_playing = await status_msg.edit(
-            text,
-            reply_markup=Keyboards.player_controls(chat_id)
-        )
-        
-        # Start progress updater
-        await client.music.player.start_progress_updater(chat_id, now_playing.id)
-        
+    # Initialize player if needed
+    global player
+    if not player:
+        from bot.client import call_client
+        from bot.core.player import Player
+        player = Player(call_client)
+    
+    # If not playing, start playback
+    if not player.is_playing.get(chat_id):
+        if await player.play(chat_id, track):
+            # Create now playing message
+            text = get_text(
+                message.chat,
+                "now_playing",
+                title=track.title,
+                duration=formatting.duration(track.duration),
+                requester=track.requester_name,
+                progress_bar=formatting.progress_bar(0, track.duration, 15),
+                elapsed="00:00",
+                total=formatting.duration(track.duration)
+            )
+            
+            now_playing = await search_msg.edit_text(
+                text,
+                reply_markup=keyboards.player_controls(chat_id)
+            )
+            
+            # Start progress updater
+            await player.start_progress_updater(chat_id, now_playing, track)
+        else:
+            await search_msg.edit_text(
+                get_text(message.chat, "error", message="Failed to start playback")
+            )
     else:
         # Added to queue
-        await status_msg.edit(
-            get_text(user_id, "added_to_queue", position=position)
+        await search_msg.edit_text(
+            get_text(
+                message.chat,
+                "added_to_queue",
+                title=track.title,
+                position=position
+            )
         )
