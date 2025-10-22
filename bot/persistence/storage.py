@@ -1,25 +1,77 @@
-from tinydb import TinyDB, Query
-from config import Config
+"""Storage backend abstraction."""
 
-# Simple Key-Value storage using TinyDB
-class Storage:
-    def __init__(self, db_name: str):
-        self.db = TinyDB(Config.BASE_DIR / f"{db_name}.json")
-        self.Query = Query()
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional
+from pathlib import Path
+import json
+import asyncio
+
+class StorageBackend(ABC):
+    """Abstract storage backend."""
     
-    def get(self, key):
-        result = self.db.get(self.Query.key == key)
-        return result['value'] if result else None
-
-    def set(self, key, value):
-        self.db.upsert({'key': key, 'value': value}, self.Query.key == key)
-
-    def all(self):
-        return self.db.all()
+    @abstractmethod
+    async def get(self, key: str) -> Optional[Any]:
+        """Get value by key."""
+        pass
     
-    def remove(self, key):
-        self.db.remove(self.Query.key == key)
+    @abstractmethod
+    async def set(self, key: str, value: Any) -> bool:
+        """Set value for key."""
+        pass
+    
+    @abstractmethod
+    async def delete(self, key: str) -> bool:
+        """Delete key."""
+        pass
+    
+    @abstractmethod
+    async def get_all(self) -> Dict[str, Any]:
+        """Get all key-value pairs."""
+        pass
 
-# Instances for different states
-playback_storage = Storage("playback_state")
-language_storage = Storage("user_languages")
+class TinyDBBackend(StorageBackend):
+    """TinyDB storage backend."""
+    
+    def __init__(self, db_path: str = "data/bot.json"):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._data: Dict[str, Any] = {}
+        self._load()
+    
+    def _load(self):
+        """Load data from file."""
+        if self.db_path.exists():
+            try:
+                with open(self.db_path, "r") as f:
+                    self._data = json.load(f)
+            except:
+                self._data = {}
+    
+    def _save(self):
+        """Save data to file."""
+        with open(self.db_path, "w") as f:
+            json.dump(self._data, f, indent=2)
+    
+    async def get(self, key: str) -> Optional[Any]:
+        """Get value by key."""
+        return self._data.get(key)
+    
+    async def set(self, key: str, value: Any) -> bool:
+        """Set value for key."""
+        self._data[key] = value
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._save)
+        return True
+    
+    async def delete(self, key: str) -> bool:
+        """Delete key."""
+        if key in self._data:
+            del self._data[key]
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._save)
+            return True
+        return False
+    
+    async def get_all(self) -> Dict[str, Any]:
+        """Get all key-value pairs."""
+        return self._data.copy()
