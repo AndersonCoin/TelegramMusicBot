@@ -1,31 +1,71 @@
+"""Localization system."""
+
 import json
-from config import Config
-from bot.persistence.storage import language_storage
+import logging
+from pathlib import Path
+from typing import Dict, Optional, Any
 
-_translations = {}
-_default_lang = "en"
+logger = logging.getLogger(__name__)
 
-def load_translations():
-    for lang_file in Config.BASE_DIR.joinpath("locales").glob("*.json"):
-        lang_code = lang_file.stem
-        with open(lang_file, "r", encoding="utf-8") as f:
-            _translations[lang_code] = json.load(f)
-
-def get_text(chat_or_user_id, key, **kwargs):
-    lang = language_storage.get(str(chat_or_user_id)) or _default_lang
+class Localization:
+    """Handles multi-language support."""
     
-    text = _translations.get(lang, {}).get(key)
-    if text is None:
+    def __init__(self):
+        self.translations: Dict[str, Dict] = {}
+        self.user_languages: Dict[int, str] = {}
+        self.default_language = "en"
+        self._load_translations()
+    
+    def _load_translations(self):
+        """Load all translation files."""
+        locales_dir = Path("locales")
+        
+        for file_path in locales_dir.glob("*.json"):
+            lang_code = file_path.stem
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    self.translations[lang_code] = json.load(f)
+                logger.info(f"Loaded language: {lang_code}")
+            except Exception as e:
+                logger.error(f"Failed to load {lang_code}: {e}")
+    
+    def get_text(
+        self,
+        user_or_chat_id: int,
+        key: str,
+        **kwargs
+    ) -> str:
+        """Get translated text for user/chat."""
+        lang = self.user_languages.get(user_or_chat_id, self.default_language)
+        
+        # Get translation
+        text = self.translations.get(lang, {}).get(key)
+        
         # Fallback to English
-        text = _translations.get(_default_lang, {}).get(key, f"_{key}_")
+        if not text:
+            text = self.translations.get(self.default_language, {}).get(key, key)
+        
+        # Format with kwargs
+        try:
+            return text.format(**kwargs) if kwargs else text
+        except:
+            return text
     
-    return text.format(**kwargs)
+    def set_language(self, user_or_chat_id: int, language: str):
+        """Set language for user/chat."""
+        if language in self.translations:
+            self.user_languages[user_or_chat_id] = language
+            return True
+        return False
+    
+    def get_language(self, user_or_chat_id: int) -> str:
+        """Get current language for user/chat."""
+        return self.user_languages.get(user_or_chat_id, self.default_language)
 
-def set_language(chat_or_user_id, lang_code):
-    if lang_code in _translations:
-        language_storage.set(str(chat_or_user_id), lang_code)
-        return True
-    return False
+# Global instance
+localization = Localization()
 
-# Load translations on startup
-load_translations()
+# Helper function
+def get_text(user_or_chat_id: int, key: str, **kwargs) -> str:
+    """Quick access to get_text."""
+    return localization.get_text(user_or_chat_id, key, **kwargs)
