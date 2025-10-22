@@ -1,37 +1,91 @@
+"""Assistant management utilities."""
+
 import logging
-from pyrogram import Client
-from pyrogram.errors import UserAlreadyParticipant, UserNotParticipant, UserPrivacyRestricted
 from pyrogram.types import ChatPrivileges
-from config import Config
+from pyrogram.errors import (
+    ChatAdminRequired,
+    UserNotParticipant,
+    UserPrivacyRestricted,
+    PeerIdInvalid
+)
 
 logger = logging.getLogger(__name__)
 
-async def ensure_assistant(client: Client, chat_id: int) -> bool:
-    assistant_username = Config.ASSISTANT_USERNAME
-    try:
-        await client.get_chat_member(chat_id, assistant_username)
-    except UserNotParticipant:
+class AssistantManager:
+    """Manages assistant user operations."""
+    
+    @staticmethod
+    async def ensure_in_chat(client, chat_id: int) -> tuple[bool, str]:
+        """Ensure assistant is in chat and has permissions."""
         try:
-            logger.info(f"Inviting assistant @{assistant_username} to chat {chat_id}")
-            await client.add_chat_members(chat_id, assistant_username)
-        except UserPrivacyRestricted:
-            logger.error(f"Cannot invite @{assistant_username} due to privacy settings.")
-            return False
+            # Check if assistant is in chat
+            try:
+                member = await client.bot.get_chat_member(
+                    chat_id, 
+                    client.assistant_id
+                )
+                
+                # Check if has video chat permission
+                if member.privileges and member.privileges.can_manage_video_chats:
+                    return True, "ready"
+                    
+                # Need to promote
+                return await AssistantManager.promote_assistant(client, chat_id)
+                
+            except UserNotParticipant:
+                # Invite assistant
+                success, msg = await AssistantManager.invite_assistant(client, chat_id)
+                if not success:
+                    return False, msg
+                    
+                # Promote after invitation
+                return await AssistantManager.promote_assistant(client, chat_id)
+                
         except Exception as e:
-            logger.error(f"Failed to invite @{assistant_username}: {e}")
-            return False
-
-    try:
-        member = await client.get_chat_member(chat_id, assistant_username)
-        if not member.privileges or not member.privileges.can_manage_video_chats:
-            logger.info(f"Promoting @{assistant_username} in {chat_id}")
-            await client.promote_chat_member(
+            logger.error(f"Assistant check failed: {e}")
+            return False, str(e)
+    
+    @staticmethod
+    async def invite_assistant(client, chat_id: int) -> tuple[bool, str]:
+        """Invite assistant to chat."""
+        try:
+            # Get chat invite link
+            chat = await client.bot.get_chat(chat_id)
+            
+            if chat.username:
+                # Public chat
+                await client.assistant.join_chat(chat.username)
+            else:
+                # Private chat - create invite link
+                link = await client.bot.export_chat_invite_link(chat_id)
+                await client.assistant.join_chat(link)
+                await client.bot.revoke_chat_invite_link(chat_id, link)
+            
+            return True, "assistant_invited"
+            
+        except UserPrivacyRestricted:
+            return False, "Assistant privacy settings prevent joining"
+        except ChatAdminRequired:
+            return False, "Bot needs admin rights to invite assistant"
+        except Exception as e:
+            logger.error(f"Failed to invite assistant: {e}")
+            return False, str(e)
+    
+    @staticmethod
+    async def promote_assistant(client, chat_id: int) -> tuple[bool, str]:
+        """Promote assistant with video chat permissions."""
+        try:
+            await client.bot.promote_chat_member(
                 chat_id,
-                assistant_username,
-                privileges=ChatPrivileges(can_manage_video_chats=True)
+                client.assistant_id,
+                privileges=ChatPrivileges(
+                    can_manage_video_chats=True
+                )
             )
-    except Exception as e:
-        logger.error(f"Failed to promote @{assistant_username}: {e}")
-        return False
-        
-    return True
+            return True, "assistant_promoted"
+            
+        except ChatAdminRequired:
+            return False, "Bot needs admin rights to promote assistant"
+        except Exception as e:
+            logger.error(f"Failed to promote assistant: {e}")
+            return False, str(e)
