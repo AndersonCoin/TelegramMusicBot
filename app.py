@@ -1,3 +1,45 @@
+#!/usr/bin/env python3
+"""Main application entry point."""
+
+# إصلاح تلقائي للملفات المعطوبة
+import os
+import sys
+
+def fix_init_files():
+    """إصلاح ملفات __init__.py تلقائياً"""
+    fixes = {
+        "bot/__init__.py": '"""Bot package."""\n\n__version__ = "2.1.0"\n',
+        "bot/core/__init__.py": '"""Core package."""\n\nplayer = None\n',
+        "bot/helpers/__init__.py": '"""Helpers package."""\n',
+        "bot/plugins/__init__.py": '"""Plugins package."""\n',
+        "bot/persistence/__init__.py": '"""Persistence package."""\n',
+    }
+    
+    for filepath, content in fixes.items():
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, 'w') as f:
+                f.write(content)
+            print(f"✅ Fixed: {filepath}")
+        except Exception as e:
+            print(f"❌ Error fixing {filepath}: {e}")
+
+# إصلاح الملفات قبل الاستيراد
+fix_init_files()
+
+# الآن imports العادية
+import asyncio
+import logging
+import signal
+from typing import Optional
+
+from aiohttp import web
+from pyrogram import idle
+
+from config import config
+from bot.client import bot_client, user_client, call_client
+
+# باقي الكود...
 """Main application entry point."""
 
 import asyncio
