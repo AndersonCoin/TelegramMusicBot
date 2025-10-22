@@ -1,1 +1,12 @@
-# TelegramMusicBot
+# Core
+pyrogram==2.0.106
+py-tgcalls>=2.2.8
+TgCrypto==1.2.5
+
+# Features
+yt-dlp
+python-dotenv
+aiohttp
+
+# Persistence
+tinydb
