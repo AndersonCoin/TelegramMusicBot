@@ -1,11 +1,9 @@
 """Client initialization for bot and assistant."""
 
 import logging
-from typing import Optional
 
 from pyrogram import Client
 from pyrogram.enums import ParseMode
-from pytgcalls import PyTgCalls
 
 from config import config
 
@@ -21,7 +19,7 @@ bot_client = Client(
     parse_mode=ParseMode.MARKDOWN
 )
 
-# Initialize user (assistant) client
+# Initialize user (assistant) client  
 user_client = Client(
     "assistant",
     api_id=config.API_ID,
@@ -29,8 +27,7 @@ user_client = Client(
     session_string=config.SESSION_STRING
 )
 
-# Initialize PyTgCalls
-call_client = PyTgCalls(user_client)
+# Don't initialize PyTgCalls here, do it in app.py after clients start
+call_client = None
 
-# Export for app.py
-app = bot_client  # Alias for compatibility
+logger.info("Clients created successfully")
