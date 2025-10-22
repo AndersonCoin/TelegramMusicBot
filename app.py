@@ -10,8 +10,7 @@ from aiohttp import web
 from pyrogram import idle
 
 from config import config
-from bot.client import bot_client, user_client, call_client, initialize_clients
-from bot.persistence.state import StateManager
+from bot.client import bot_client, user_client, call_client
 
 # Configure logging
 logging.basicConfig(
@@ -25,8 +24,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Health check server
-app = web.Application()
-state_manager: Optional[StateManager] = None
+health_app = web.Application()
+state_manager: Optional['StateManager'] = None
 
 async def health_check(request: web.Request) -> web.Response:
     """Health check endpoint."""
@@ -37,8 +36,6 @@ async def cleanup_handler(app: web.Application) -> None:
     logger.info("Shutting down...")
     if state_manager:
         await state_manager.save_all_states()
-    await bot_client.stop()
-    await user_client.stop()
 
 async def start_bot() -> None:
     """Start the bot and assistant clients."""
@@ -52,11 +49,22 @@ async def start_bot() -> None:
     # Initialize clients
     await bot_client.start()
     await user_client.start()
-    await initialize_clients()
+    await call_client.start()
+    
+    # Import here to avoid circular imports
+    from bot.persistence.state import StateManager
+    from bot.helpers.assistant import AssistantManager, assistant_manager
     
     # Initialize state manager
     state_manager = StateManager()
     await state_manager.initialize()
+    
+    # Initialize assistant manager
+    assistant_mgr = AssistantManager(bot_client, user_client)
+    await assistant_mgr.initialize()
+    # Set global reference
+    from bot import helpers
+    helpers.assistant.assistant_manager = assistant_mgr
     
     # Resume playback for all saved states
     await state_manager.resume_all_playback()
@@ -69,11 +77,11 @@ async def start_bot() -> None:
     
     # Setup health check if needed
     if config.PORT:
-        app.router.add_get("/", health_check)
-        app.router.add_get("/health", health_check)
-        app.on_cleanup.append(cleanup_handler)
+        health_app.router.add_get("/", health_check)
+        health_app.router.add_get("/health", health_check)
+        health_app.on_cleanup.append(cleanup_handler)
         
-        runner = web.AppRunner(app)
+        runner = web.AppRunner(health_app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", config.PORT)
         await site.start()
