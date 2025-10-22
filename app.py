@@ -1,77 +1,74 @@
+"""Main application entry point."""
+
 import asyncio
 import logging
-from pyrogram import idle
+import signal
 from aiohttp import web
-
+from bot.client import BotClient
 from config import Config
-# ✅ استيراد المتغيرات الجديدة
-from bot.client import app, user_app, pytgcalls
-from bot.persistence.state import auto_resume_all_states
 
-# ... (كود logging و health_check كما هو)
+# Configure logging
 logging.basicConfig(
-    level=getattr(logging, Config.LOG_LEVEL, "INFO"),
-    format='[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.FileHandler(Config.LOG_DIR / 'bot.log'),
-        logging.StreamHandler()
-    ]
+    level=getattr(logging, Config.LOG_LEVEL),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger(__name__)
 
-async def health_check(request):
-    return web.Response(text="Bot is running!")
+# Global bot instance
+bot_client: BotClient = None
 
-async def start_health_server():
-    health_app = web.Application()
-    health_app.router.add_get('/', health_check)
-    runner = web.AppRunner(health_app)
+async def health_check(request):
+    """Health check endpoint."""
+    return web.Response(text="Bot is running!", status=200)
+
+async def start_web_server():
+    """Start health check web server."""
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    
+    runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', Config.PORT)
+    site = web.TCPSite(runner, "0.0.0.0", Config.PORT)
     await site.start()
-    logger.info(f"✓ Health server started on port {Config.PORT}")
+    logger.info(f"Health server started on port {Config.PORT}")
+    return runner
+
+async def shutdown(runner):
+    """Graceful shutdown handler."""
+    logger.info("Shutting down...")
+    if bot_client:
+        await bot_client.stop()
+    if runner:
+        await runner.cleanup()
 
 async def main():
-    """Main function."""
-    try:
-        logger.info("="*50)
-        logger.info("Starting Telegram Music Bot")
-        logger.info("="*50)
-
-        Config.validate()
-        logger.info("✓ Configuration validated")
-
-        await start_health_server()
-        
-        # ✅ ابدأ كل client على حدة
-        await app.start()
-        logger.info("✓ Bot client started")
-        
-        await user_app.start()
-        logger.info("✓ User client started")
-
-        await pytgcalls.start()
-        logger.info("✓ PyTgCalls started")
-
-        await auto_resume_all_states()
-
-        logger.info("="*50)
-        logger.info("Bot is running! Press Ctrl+C to stop.")
-        logger.info("="*50)
-
-        await idle()
-
-    except KeyboardInterrupt:
-        logger.info("Stopping...")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-    finally:
-        # ✅ أوقف كل client على حدة
-        await app.stop()
-        await user_app.stop()
-        # pytgcalls ليس لديه stop() method في بعض الإصدارات
-        logger.info("✓ All clients stopped")
-        logger.info("Goodbye!")
+    """Main application loop."""
+    global bot_client
+    
+    # Initialize bot client
+    bot_client = BotClient()
+    
+    # Start bot
+    await bot_client.start()
+    logger.info("Bot started successfully")
+    
+    # Start web server
+    runner = await start_web_server()
+    
+    # Setup signal handlers
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(
+            sig, lambda: asyncio.create_task(shutdown(runner))
+        )
+    
+    # Keep running
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
