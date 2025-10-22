@@ -3,72 +3,128 @@
 import asyncio
 import logging
 import signal
+import sys
+from typing import Optional
+
 from aiohttp import web
-from bot.client import BotClient
-from config import Config
+from pyrogram import idle
+
+from config import config
+from bot.client import bot_client, user_client, call_client, initialize_clients
+from bot.persistence.state import StateManager
 
 # Configure logging
 logging.basicConfig(
-    level=getattr(logging, Config.LOG_LEVEL),
+    level=getattr(logging, config.LOG_LEVEL),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("bot.log")
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# Global bot instance
-bot_client: BotClient = None
+# Health check server
+app = web.Application()
+state_manager: Optional[StateManager] = None
 
-async def health_check(request):
+async def health_check(request: web.Request) -> web.Response:
     """Health check endpoint."""
     return web.Response(text="Bot is running!", status=200)
 
-async def start_web_server():
-    """Start health check web server."""
-    app = web.Application()
-    app.router.add_get("/", health_check)
-    app.router.add_get("/health", health_check)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", Config.PORT)
-    await site.start()
-    logger.info(f"Health server started on port {Config.PORT}")
-    return runner
-
-async def shutdown(runner):
-    """Graceful shutdown handler."""
+async def cleanup_handler(app: web.Application) -> None:
+    """Cleanup on shutdown."""
     logger.info("Shutting down...")
-    if bot_client:
-        await bot_client.stop()
-    if runner:
-        await runner.cleanup()
+    if state_manager:
+        await state_manager.save_all_states()
+    await bot_client.stop()
+    await user_client.stop()
 
-async def main():
-    """Main application loop."""
-    global bot_client
+async def start_bot() -> None:
+    """Start the bot and assistant clients."""
+    global state_manager
     
-    # Initialize bot client
-    bot_client = BotClient()
+    # Validate configuration
+    config.validate()
     
-    # Start bot
+    logger.info("Starting bot...")
+    
+    # Initialize clients
     await bot_client.start()
-    logger.info("Bot started successfully")
+    await user_client.start()
+    await initialize_clients()
     
-    # Start web server
-    runner = await start_web_server()
+    # Initialize state manager
+    state_manager = StateManager()
+    await state_manager.initialize()
     
-    # Setup signal handlers
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(
-            sig, lambda: asyncio.create_task(shutdown(runner))
-        )
+    # Resume playback for all saved states
+    await state_manager.resume_all_playback()
     
-    # Keep running
-    await asyncio.Event().wait()
+    # Start periodic tasks
+    asyncio.create_task(state_manager.periodic_save())
+    asyncio.create_task(cleanup_downloads())
+    
+    logger.info("Bot started successfully!")
+    
+    # Setup health check if needed
+    if config.PORT:
+        app.router.add_get("/", health_check)
+        app.router.add_get("/health", health_check)
+        app.on_cleanup.append(cleanup_handler)
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", config.PORT)
+        await site.start()
+        logger.info(f"Health check server running on port {config.PORT}")
+    
+    # Keep the bot running
+    await idle()
+
+async def cleanup_downloads() -> None:
+    """Periodically clean up old download files."""
+    while True:
+        try:
+            await asyncio.sleep(config.CLEANUP_INTERVAL)
+            
+            # Clean files older than 1 hour
+            import time
+            from pathlib import Path
+            
+            cutoff = time.time() - 3600
+            for file in config.DOWNLOAD_DIR.glob("*"):
+                if file.is_file() and file.stat().st_mtime < cutoff:
+                    try:
+                        file.unlink()
+                        logger.debug(f"Cleaned up old file: {file}")
+                    except Exception as e:
+                        logger.error(f"Error cleaning file {file}: {e}")
+                        
+        except Exception as e:
+            logger.error(f"Error in cleanup task: {e}")
+
+def signal_handler(sig, frame):
+    """Handle shutdown signals."""
+    logger.info("Received shutdown signal")
+    asyncio.create_task(shutdown())
+
+async def shutdown():
+    """Graceful shutdown."""
+    if state_manager:
+        await state_manager.save_all_states()
+    sys.exit(0)
 
 if __name__ == "__main__":
+    # Setup signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Run the bot
     try:
-        asyncio.run(main())
+        asyncio.run(start_bot())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
