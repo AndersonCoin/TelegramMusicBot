@@ -1,7 +1,7 @@
-pyrogram
-tgcrypto
-py-tgcalls
+pyrogram==2.0.106
+tgcrypto==1.2.5
+git+https://github.com/pytgcalls/pytgcalls.git
 yt-dlp
 python-dotenv
 aiohttp
-psutil
+ffmpeg-python
