@@ -4,6 +4,7 @@ import asyncio
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 from dotenv import load_dotenv
+from aiohttp import web
 
 # Load environment variables
 load_dotenv()
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", 10000))
 
 # Check variables
 if not API_ID or not API_HASH or not BOT_TOKEN:
@@ -91,7 +93,7 @@ async def ping_command(client, message):
     msg = await message.reply_text("🏓 Pong!")
     end = time.time()
     latency = round((end - start) * 1000, 2)
-    await msg.edit(f"🏓 **Pong!**\nLatency: {latency}ms")
+    await msg.edit(f"🏓 **Pong!**\nLatency: {latency}ms\n✅ Bot is Online")
 
 # Stats command
 @app.on_message(filters.command("stats"))
@@ -189,20 +191,82 @@ async def skip_command(client, message):
     else:
         await message.reply_text("❌ No songs to skip")
 
-# Test command
-@app.on_message(filters.command("test"))
-async def test_command(client, message):
-    await message.reply_text("✅ **Bot is working perfectly!**")
+# Web server handlers
+async def health_check(request):
+    return web.Response(text="Bot is running! ✅")
+
+async def index(request):
+    bot_info = await app.get_me()
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Music Bot Status</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+            }}
+            .container {{
+                text-align: center;
+                background: rgba(255,255,255,0.1);
+                padding: 40px;
+                border-radius: 20px;
+                backdrop-filter: blur(10px);
+            }}
+            h1 {{ margin: 0; font-size: 3em; }}
+            .status {{ color: #4ade80; font-size: 1.5em; margin: 20px 0; }}
+            .info {{ margin: 10px 0; font-size: 1.2em; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🎵 Music Bot</h1>
+            <div class="status">✅ Online</div>
+            <div class="info">Bot: @{bot_info.username}</div>
+            <div class="info">Active Chats: {len(active_chats)}</div>
+            <div class="info">Music Queues: {len(music_queue)}</div>
+        </div>
+    </body>
+    </html>
+    """
+    return web.Response(text=html, content_type='text/html')
+
+# Web server setup
+async def start_web_server():
+    app_web = web.Application()
+    app_web.router.add_get('/', index)
+    app_web.router.add_get('/health', health_check)
+    
+    runner = web.AppRunner(app_web)
+    await runner.setup()
+    
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"Web server started on port {PORT}")
 
 # Main function
 async def main():
     try:
         logger.info("Starting bot...")
+        
+        # Start web server
+        await start_web_server()
+        
+        # Start bot
         await app.start()
         
         me = await app.get_me()
         logger.info(f"Bot started! Username: @{me.username}")
+        logger.info(f"Bot ID: {me.id}")
         
+        # Keep running
         await idle()
         
         await app.stop()
@@ -220,4 +284,3 @@ if __name__ == "__main__":
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
-        
