@@ -3,8 +3,12 @@ import logging
 import asyncio
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
+from pytgcalls import PyTgCalls, StreamType
+from pytgcalls.types.input_stream import AudioPiped
+from pytgcalls.exceptions import NoActiveGroupCall
 from dotenv import load_dotenv
 from aiohttp import web
+import yt_dlp
 
 # Load environment variables
 load_dotenv()
@@ -16,19 +20,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Get environment variables
+# Environment variables
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+SESSION_STRING = os.getenv("SESSION_STRING")  # User bot session
 PORT = int(os.getenv("PORT", 10000))
 
-# Check variables
-if not API_ID or not API_HASH or not BOT_TOKEN:
+if not all([API_ID, API_HASH, BOT_TOKEN]):
     logger.error("Missing environment variables!")
     exit(1)
 
-# Create bot client
-app = Client(
+# Bot client
+bot = Client(
     "MusicBot",
     api_id=int(API_ID),
     api_hash=API_HASH,
@@ -36,167 +40,293 @@ app = Client(
     in_memory=True
 )
 
+# User client (for voice chat)
+if SESSION_STRING:
+    user = Client(
+        "UserBot",
+        api_id=int(API_ID),
+        api_hash=API_HASH,
+        session_string=SESSION_STRING,
+        in_memory=True
+    )
+    calls = PyTgCalls(user)
+    USERBOT_AVAILABLE = True
+else:
+    user = None
+    calls = None
+    USERBOT_AVAILABLE = False
+    logger.warning("No SESSION_STRING found! Music playback will not work.")
+
 # Global variables
 music_queue = {}
 active_chats = set()
+currently_playing = {}
 
-# Start command
-@app.on_message(filters.command("start"))
+# YouTube downloader config
+ydl_opts = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True,
+    'extract_flat': False,
+    'geo_bypass': True,
+}
+
+# Helper function to download from YouTube
+async def download_song(query):
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if query.startswith(('http://', 'https://')):
+                info = ydl.extract_info(query, download=False)
+            else:
+                info = ydl.extract_info(f"ytsearch:{query}", download=False)
+                if 'entries' in info:
+                    info = info['entries'][0]
+            
+            return {
+                'title': info.get('title', 'Unknown'),
+                'url': info['url'],
+                'duration': info.get('duration', 0),
+                'thumbnail': info.get('thumbnail', ''),
+                'webpage_url': info.get('webpage_url', '')
+            }
+    except Exception as e:
+        logger.error(f"Error downloading: {e}")
+        return None
+
+# Format duration
+def format_duration(seconds):
+    if not seconds:
+        return "Live"
+    mins, secs = divmod(seconds, 60)
+    hours, mins = divmod(mins, 60)
+    if hours:
+        return f"{hours:02d}:{mins:02d}:{secs:02d}"
+    return f"{mins:02d}:{secs:02d}"
+
+# Play next song in queue
+async def play_next(chat_id):
+    if chat_id not in music_queue or not music_queue[chat_id]:
+        try:
+            await calls.leave_group_call(chat_id)
+            if chat_id in currently_playing:
+                del currently_playing[chat_id]
+            logger.info(f"Queue empty, left chat {chat_id}")
+        except Exception as e:
+            logger.error(f"Error leaving call: {e}")
+        return
+    
+    next_song = music_queue[chat_id].pop(0)
+    try:
+        await calls.play(
+            chat_id,
+            AudioPiped(next_song['url']),
+            stream_type=StreamType().pulse_stream
+        )
+        currently_playing[chat_id] = next_song
+        logger.info(f"Now playing: {next_song['title']}")
+    except Exception as e:
+        logger.error(f"Error playing song: {e}")
+        await play_next(chat_id)
+
+# Bot commands
+@bot.on_message(filters.command("start"))
 async def start_command(client, message):
-    user_name = message.from_user.first_name
+    status = "✅ Available" if USERBOT_AVAILABLE else "❌ Not Available"
     welcome_text = f"""
-🎵 **Welcome {user_name}!**
+🎵 **Welcome to Music Bot!**
 
-I am a music bot for Telegram groups.
+**Bot Status:** ✅ Online
+**Music Playback:** {status}
 
 **Available Commands:**
 /play [song name] - Play a song
 /pause - Pause playback
 /resume - Resume playback
 /skip - Skip current song
-/stop - Stop playback
-/queue - Show queue
-/help - Show help
+/stop - Stop and clear queue
+/queue - Show current queue
+/current - Show current song
 
-Add me to your group and make me admin!
+Add me to your group and start a voice chat!
 """
     await message.reply_text(welcome_text)
-    logger.info(f"User {message.from_user.id} started the bot")
 
-# Help command
-@app.on_message(filters.command("help"))
+@bot.on_message(filters.command("help"))
 async def help_command(client, message):
     help_text = """
 📚 **Command List:**
 
 **Music Commands:**
-/play [song] - Play a song
+/play [song/link] - Play a song
 /pause - Pause playback
 /resume - Resume playback
-/skip - Skip song
+/skip - Skip current song
 /stop - Stop playback
 /queue - Show queue
+/current - Current song
 
-**General Commands:**
-/start - Start bot
-/help - Show help
-/ping - Check bot status
-/stats - Bot statistics
+**Requirements:**
+• Add bot to your group
+• Make bot admin
+• Start a voice chat
+• Use /play command
 """
     await message.reply_text(help_text)
 
-# Ping command
-@app.on_message(filters.command("ping"))
+@bot.on_message(filters.command("ping"))
 async def ping_command(client, message):
     import time
     start = time.time()
     msg = await message.reply_text("🏓 Pong!")
     end = time.time()
     latency = round((end - start) * 1000, 2)
-    await msg.edit(f"🏓 **Pong!**\nLatency: {latency}ms\n✅ Bot is Online")
+    
+    userbot_status = "✅ Online" if USERBOT_AVAILABLE else "❌ Offline"
+    
+    await msg.edit(
+        f"🏓 **Pong!**\n"
+        f"⚡ Latency: `{latency}ms`\n"
+        f"🤖 Bot: ✅ Online\n"
+        f"👤 UserBot: {userbot_status}"
+    )
 
-# Stats command
-@app.on_message(filters.command("stats"))
-async def stats_command(client, message):
-    total_chats = len(active_chats)
-    total_queues = len(music_queue)
-    stats_text = f"""
-📊 **Bot Statistics:**
-
-Active Chats: {total_chats}
-Music Queues: {total_queues}
-Status: ✅ Online
-Version: 1.0.0
-"""
-    await message.reply_text(stats_text)
-
-# Play command
-@app.on_message(filters.command(["play", "p"]))
+@bot.on_message(filters.command(["play", "p"]) & filters.group)
 async def play_command(client, message):
+    if not USERBOT_AVAILABLE:
+        return await message.reply_text(
+            "❌ **Music playback unavailable!**\n"
+            "The assistant account is not configured."
+        )
+    
     if len(message.command) < 2:
-        return await message.reply_text("❌ Usage: /play [song name]")
+        return await message.reply_text("❌ Usage: /play [song name or YouTube link]")
     
-    song_name = " ".join(message.command[1:])
+    query = " ".join(message.command[1:])
     chat_id = message.chat.id
-    active_chats.add(chat_id)
     
-    msg = await message.reply_text(f"🔍 Searching for: {song_name}")
-    await asyncio.sleep(1)
+    msg = await message.reply_text("🔍 **Searching...**")
     
+    # Download song info
+    song_info = await download_song(query)
+    
+    if not song_info:
+        return await msg.edit("❌ **Song not found!**")
+    
+    # Add to queue
     if chat_id not in music_queue:
         music_queue[chat_id] = []
     
-    music_queue[chat_id].append({
-        'title': song_name,
-        'requested_by': message.from_user.first_name
-    })
-    
+    music_queue[chat_id].append(song_info)
     position = len(music_queue[chat_id])
     
-    await msg.edit(
-        f"✅ **Added to queue!**\n\n"
-        f"Song: {song_name}\n"
-        f"Requested by: {message.from_user.first_name}\n"
-        f"Position: #{position}"
-    )
-    logger.info(f"Song added to queue in chat {chat_id}")
+    # If nothing is playing, start playback
+    if chat_id not in currently_playing:
+        await msg.edit("🎵 **Starting playback...**")
+        await play_next(chat_id)
+        await msg.edit(
+            f"▶️ **Now Playing:**\n\n"
+            f"🎵 **{song_info['title']}**\n"
+            f"⏱️ Duration: {format_duration(song_info['duration'])}\n"
+            f"🔗 [YouTube Link]({song_info['webpage_url']})"
+        )
+    else:
+        await msg.edit(
+            f"✅ **Added to queue at position #{position}**\n\n"
+            f"🎵 {song_info['title']}\n"
+            f"⏱️ {format_duration(song_info['duration'])}"
+        )
 
-# Queue command
-@app.on_message(filters.command("queue"))
+@bot.on_message(filters.command("pause") & filters.group)
+async def pause_command(client, message):
+    if not USERBOT_AVAILABLE:
+        return await message.reply_text("❌ UserBot not available")
+    
+    chat_id = message.chat.id
+    try:
+        await calls.pause_stream(chat_id)
+        await message.reply_text("⏸️ **Playback paused**")
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {str(e)}")
+
+@bot.on_message(filters.command("resume") & filters.group)
+async def resume_command(client, message):
+    if not USERBOT_AVAILABLE:
+        return await message.reply_text("❌ UserBot not available")
+    
+    chat_id = message.chat.id
+    try:
+        await calls.resume_stream(chat_id)
+        await message.reply_text("▶️ **Playback resumed**")
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {str(e)}")
+
+@bot.on_message(filters.command("skip") & filters.group)
+async def skip_command(client, message):
+    if not USERBOT_AVAILABLE:
+        return await message.reply_text("❌ UserBot not available")
+    
+    chat_id = message.chat.id
+    await message.reply_text("⏭️ **Skipping...**")
+    await play_next(chat_id)
+
+@bot.on_message(filters.command("stop") & filters.group)
+async def stop_command(client, message):
+    if not USERBOT_AVAILABLE:
+        return await message.reply_text("❌ UserBot not available")
+    
+    chat_id = message.chat.id
+    
+    try:
+        await calls.leave_group_call(chat_id)
+        music_queue[chat_id] = []
+        if chat_id in currently_playing:
+            del currently_playing[chat_id]
+        await message.reply_text("⏹️ **Stopped and cleared queue**")
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {str(e)}")
+
+@bot.on_message(filters.command("queue") & filters.group)
 async def queue_command(client, message):
     chat_id = message.chat.id
     
     if chat_id not in music_queue or not music_queue[chat_id]:
-        return await message.reply_text("📭 Queue is empty")
+        return await message.reply_text("📭 **Queue is empty**")
     
     queue_text = "📋 **Current Queue:**\n\n"
+    
+    if chat_id in currently_playing:
+        queue_text += f"▶️ **Now Playing:**\n{currently_playing[chat_id]['title']}\n\n"
+    
+    queue_text += "**Up Next:**\n"
     for i, song in enumerate(music_queue[chat_id], 1):
         queue_text += f"{i}. {song['title']}\n"
-        queue_text += f"   By: {song['requested_by']}\n\n"
     
     await message.reply_text(queue_text)
 
-# Stop command
-@app.on_message(filters.command("stop"))
-async def stop_command(client, message):
+@bot.on_message(filters.command("current") & filters.group)
+async def current_command(client, message):
     chat_id = message.chat.id
     
-    if chat_id in music_queue:
-        music_queue[chat_id] = []
+    if chat_id not in currently_playing:
+        return await message.reply_text("❌ **Nothing is playing**")
     
-    if chat_id in active_chats:
-        active_chats.remove(chat_id)
-    
-    await message.reply_text("⏹️ **Playback stopped**")
-    logger.info(f"Stopped playback in chat {chat_id}")
+    song = currently_playing[chat_id]
+    await message.reply_text(
+        f"▶️ **Now Playing:**\n\n"
+        f"🎵 {song['title']}\n"
+        f"⏱️ {format_duration(song['duration'])}\n"
+        f"🔗 [YouTube Link]({song['webpage_url']})"
+    )
 
-# Pause command
-@app.on_message(filters.command("pause"))
-async def pause_command(client, message):
-    await message.reply_text("⏸️ **Playback paused**")
-
-# Resume command
-@app.on_message(filters.command("resume"))
-async def resume_command(client, message):
-    await message.reply_text("▶️ **Playback resumed**")
-
-# Skip command
-@app.on_message(filters.command("skip"))
-async def skip_command(client, message):
-    chat_id = message.chat.id
-    
-    if chat_id in music_queue and music_queue[chat_id]:
-        skipped = music_queue[chat_id].pop(0)
-        await message.reply_text(f"⏭️ **Skipped:** {skipped['title']}")
-    else:
-        await message.reply_text("❌ No songs to skip")
-
-# Web server handlers
+# Web server
 async def health_check(request):
     return web.Response(text="Bot is running! ✅")
 
 async def index(request):
-    bot_info = await app.get_me()
+    bot_info = await bot.get_me()
+    userbot_status = "Online" if USERBOT_AVAILABLE else "Offline"
+    
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -230,15 +360,14 @@ async def index(request):
             <h1>🎵 Music Bot</h1>
             <div class="status">✅ Online</div>
             <div class="info">Bot: @{bot_info.username}</div>
+            <div class="info">UserBot: {userbot_status}</div>
             <div class="info">Active Chats: {len(active_chats)}</div>
-            <div class="info">Music Queues: {len(music_queue)}</div>
         </div>
     </body>
     </html>
     """
     return web.Response(text=html, content_type='text/html')
 
-# Web server setup
 async def start_web_server():
     app_web = web.Application()
     app_web.router.add_get('/', index)
@@ -260,23 +389,33 @@ async def main():
         await start_web_server()
         
         # Start bot
-        await app.start()
+        await bot.start()
+        bot_info = await bot.get_me()
+        logger.info(f"✅ Bot started: @{bot_info.username}")
         
-        me = await app.get_me()
-        logger.info(f"Bot started! Username: @{me.username}")
-        logger.info(f"Bot ID: {me.id}")
+        # Start user bot if available
+        if USERBOT_AVAILABLE:
+            await user.start()
+            await calls.start()
+            user_info = await user.get_me()
+            logger.info(f"✅ UserBot started: {user_info.first_name}")
+        else:
+            logger.warning("⚠️ UserBot not available - music playback disabled")
         
-        # Keep running
         await idle()
         
-        await app.stop()
+        # Stop
+        await bot.stop()
+        if USERBOT_AVAILABLE:
+            await calls.stop()
+            await user.stop()
+        
         logger.info("Bot stopped")
         
     except Exception as e:
         logger.error(f"Error: {e}")
         exit(1)
 
-# Run the bot
 if __name__ == "__main__":
     try:
         asyncio.run(main())
