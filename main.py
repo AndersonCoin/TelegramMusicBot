@@ -49,18 +49,16 @@ calls = None
 
 if userbot_available:
     try:
-        # **التعديل هنا:** تم تغيير "py_tgcalls" إلى "pytgcalls"
-        from pytgcalls import PyTgCalls
+        from pytgcalls import PyTgCalls  # ✅ تصحيح: pytgcalls بدلاً من py_tgcalls
         
         calls = PyTgCalls(userbot)
         pytgcalls_available = True
-        logger.info("✅ pytgcalls imported successfully")
+        logger.info("✅ py-tgcalls imported successfully")
     except ImportError as e:
-        # **تم تحديث رسالة الخطأ لتكون أكثر دقة**
-        logger.error(f"❌ pytgcalls import error: {e}")
+        logger.error(f"❌ py-tgcalls import error: {e}")
         logger.error("Install: pip install py-tgcalls")
     except Exception as e:
-        logger.error(f"❌ pytgcalls error: {e}")
+        logger.error(f"❌ py-tgcalls error: {e}")
 
 # Global data
 stats = {
@@ -186,7 +184,7 @@ async def join_chat(chat_id: int):
 async def play_next_song(chat_id: int):
     """تشغيل الأغنية التالية في القائمة"""
     if not pytgcalls_available or not calls:
-        logger.warning("⚠️ pytgcalls not available")
+        logger.warning("⚠️ py-tgcalls not available")
         return False
     
     # Check queue
@@ -211,7 +209,7 @@ async def play_next_song(chat_id: int):
     next_song = music_queue[chat_id].pop(0)
     
     try:
-        # Play using pytgcalls
+        # Play using py-tgcalls
         await calls.play(
             chat_id,
             next_song['url']
@@ -264,7 +262,7 @@ async def play_next_song(chat_id: int):
         logger.info("Trying next song...")
         return await play_next_song(chat_id)
 
-# Stream ended callback for pytgcalls
+# Stream ended callback for py-tgcalls
 if pytgcalls_available and calls:
     @calls.on_stream_end()
     async def on_stream_end(client, update):
@@ -336,7 +334,7 @@ async def help_cmd(client, message: Message):
 
 **🎵 أوامر الموسيقى:**
 • `/play [أغنية]` - {'تشغيل أغنية' if pytgcalls_available else 'البحث عن أغنية'}
-• `/search [اسم]` - بحث متقدد (5 نتائج)
+• `/search [اسم]` - بحث متقدم (5 نتائج)
 • `/pause` - إيقاف مؤقت {'✅' if pytgcalls_available else '❌'}
 • `/resume` - استئناف التشغيل {'✅' if pytgcalls_available else '❌'}
 • `/skip` - تخطي الأغنية {'✅' if pytgcalls_available else '❌'}
@@ -383,7 +381,7 @@ async def ping_cmd(client, message: Message):
         f"⚡ **السرعة:** `{latency}ms`\n"
         f"🤖 **البوت:** ✅ نشط\n"
         f"👤 **UserBot:** {'✅ متصل' if userbot_available else '❌ غير متصل'}\n"
-        f"🎵 **pytgcalls:** {'✅ جاهز' if pytgcalls_available else '❌ غير متاح'}\n"
+        f"🎵 **py-tgcalls:** {'✅ جاهز' if pytgcalls_available else '❌ غير متاح'}\n"
         f"⏱️ **وقت التشغيل:** {hours}h {mins}m\n"
         f"📊 **الرسائل:** {stats['messages']}\n"
         f"🔍 **الأغاني المبحوثة:** {stats['songs_searched']}\n"
@@ -417,7 +415,7 @@ async def stats_cmd(client, message: Message):
         f"**🔧 الحالة:**\n"
         f"• البوت: ✅ نشط\n"
         f"• UserBot: {'✅ متصل' if userbot_available else '❌ غير متصل'}\n"
-        f"• pytgcalls: {'✅ جاهز' if pytgcalls_available else '❌ غير متاح'}\n"
+        f"• py-tgcalls: {'✅ جاهز' if pytgcalls_available else '❌ غير متاح'}\n"
         f"• التشغيل الفعلي: {'✅ متاح' if (userbot_available and pytgcalls_available) else '❌ غير متاح'}"
     )
 
@@ -527,7 +525,7 @@ async def play_cmd(client, message: Message):
     music_queue[chat_id].append(song_info)
     position = len(music_queue[chat_id])
     
-    # Try playing if pytgcalls available
+    # Try playing if py-tgcalls available
     if pytgcalls_available and chat_id not in currently_playing:
         await msg.edit("🎵 **بدء التشغيل...**")
         
@@ -644,7 +642,7 @@ async def pause_cmd(client, message: Message):
     stats['messages'] += 1
     
     if not pytgcalls_available:
-        return await message.reply_text("❌ **pytgcalls غير متاح**")
+        return await message.reply_text("❌ **py-tgcalls غير متاح**")
     
     try:
         await calls.pause_stream(message.chat.id)
@@ -657,7 +655,7 @@ async def resume_cmd(client, message: Message):
     stats['messages'] += 1
     
     if not pytgcalls_available:
-        return await message.reply_text("❌ **pytgcalls غير متاح**")
+        return await message.reply_text("❌ **py-tgcalls غير متاح**")
     
     try:
         await calls.resume_stream(message.chat.id)
@@ -782,17 +780,16 @@ async def callback_handler(client, callback_query: CallbackQuery):
         await callback_query.answer()
     
     elif data == "about":
-        # **تم تحديث الوصف ليعكس اسم المكتبة الصحيح**
         await callback_query.message.edit_text(
             f"ℹ️ **حول البوت**\n\n"
             f"🤖 **الاسم:** Music Bot\n"
             f"📦 **الإصدار:** 2.0.0\n"
-            f"🛠️ **المكتبة:** Pyrogram + pytgcalls\n"
+            f"🛠️ **المكتبة:** Pyrogram + py-tgcalls\n"
             f"🔍 **المحرك:** yt-dlp\n\n"
             f"**الحالة:**\n"
             f"• البوت: ✅ نشط\n"
             f"• UserBot: {'✅ متصل' if userbot_available else '❌ غير متصل'}\n"
-            f"• pytgcalls: {'✅ جاهز' if pytgcalls_available else '❌ غير متاح'}\n\n"
+            f"• py-tgcalls: {'✅ جاهز' if pytgcalls_available else '❌ غير متاح'}\n\n"
             f"تم التطوير بـ ❤️"
         )
         await callback_query.answer()
@@ -915,106 +912,91 @@ async def index(request):
             font-weight:bold;
             transition:transform 0.2s
         }}
-    """
-    
-    # ... (بقية كود index)
-    
-    # **ملاحظة:** لم يتم تضمين الجزء المتبقي من دالة index لأنه لم يكن موجودًا في الكود الذي قدمته، وتم إيقاف الكود عند السطر الأخير من الـ HTML.
-    
-    # إذا كنت تحتاج إلى الجزء المتبقي من الدالة، يرجى تزويدي به.
-    # بناءً على الكود الذي قدمته، لا يمكن إكماله بشكل صحيح، لذا سأفترض أنك قمت بتضمين الأجزاء الأساسية فقط.
-    # سأقوم بتضمين السطر الأخير لدالة index لضمان عدم وجود خطأ نحوي (syntax error).
-    
-    stats_html = f"""
-    <div class="stats">
-        <div class="stat"><div class="stat-number">{len(currently_playing)}</div><div class="stat-label">قيد التشغيل</div></div>
-        <div class="stat"><div class="stat-number">{len(music_queue)}</div><div class="stat-label">قوائم انتظار نشطة</div></div>
-        <div class="stat"><div class="stat-number">{stats['songs_played']}</div><div class="stat-label">الأغاني المشغلة</div></div>
-        <div class="stat"><div class="stat-number">{len(stats['users'])}</div><div class="stat-label">إجمالي المستخدمين</div></div>
-        <div class="stat"><div class="stat-number">{stats['messages']}</div><div class="stat-label">إجمالي الرسائل</div></div>
-        <div class="stat"><div class="stat-number">{hours}h {mins}m</div><div class="stat-label">وقت التشغيل</div></div>
-    </div>
-    <div class="info">UserBot Status: {'✅ Connected' if userbot_available else '❌ Disconnected'}</div>
-    <div class="info">pytgcalls Status: {'✅ Ready' if pytgcalls_available else '❌ Unavailable'}</div>
-    """
-    
-    return web.Response(text=html + """
+        a:hover{{transform:translateY(-2px)}}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Music Bot</h1>
-        <div class="status">✅ Service is Running</div>
-        """ + stats_html + """
-        <a href="https://t.me/AtheerAlsalafBot" target="_blank">Start Bot on Telegram</a>
+        <h1>🎵</h1>
+        <div class="status">Music Bot {'🎉 تشغيل فعلي!' if (userbot_available and pytgcalls_available) else '⚠️ معلومات فقط'}</div>
+        
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-number">{stats['songs_played']}</div>
+                <div class="stat-label">مشغلة</div>
+            </div>
+            <div class="stat">
+                <div class="stat-number">{stats['songs_searched']}</div>
+                <div class="stat-label">مبحوثة</div>
+            </div>
+            <div class="stat">
+                <div class="stat-number">{len(stats['users'])}</div>
+                <div class="stat-label">مستخدمين</div>
+            </div>
+        </div>
+        
+        <div class="info">البوت: @{bot_username or 'Loading'}</div>
+        <div class="info">UserBot: {'✅ متصل' if userbot_available else '❌ غير متصل'}</div>
+        <div class="info">py-tgcalls: {'✅ جاهز' if pytgcalls_available else '❌ غير متاح'}</div>
+        <div class="info">قيد التشغيل: {len(currently_playing)}</div>
+        <div class="info">وقت التشغيل: {hours}h {mins}m</div>
+        
+        <a href="https://t.me/{bot_username or 'bot'}">فتح البوت →</a>
     </div>
 </body>
 </html>
-""")
+    """
+    return web.Response(text=html, content_type='text/html')
 
-# Main entry point
-async def start_bot_and_server():
+async def start_web():
+    app_web = web.Application()
+    app_web.router.add_get('/', index)
+    app_web.router.add_get('/health', health)
+    runner = web.AppRunner(app_web)
+    await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', PORT).start()
+    logger.info(f"✅ Web server on port {PORT}")
+
+# Main
+async def main():
     global bot_username
     
-    # Get bot info
-    try:
-        me = await bot.get_me()
-        bot_username = me.username
-        logger.info(f"✅ Bot: @{bot_username}")
-        logger.info(f"✅ Bot ID: {me.id}")
-    except Exception as e:
-        logger.error(f"❌ Bot connection error: {e}")
-        return
+    logger.info("="*60)
+    logger.info("🎵 MUSIC BOT WITH PY-TGCALLS")
+    logger.info("="*60)
     
-    # Get userbot info
-    if userbot_available:
-        try:
-            user_me = await userbot.get_me()
-            logger.info(f"✅ UserBot: {user_me.first_name}")
-        except Exception as e:
-            logger.error(f"❌ UserBot connection error: {e}")
-            
-    if userbot_available and pytgcalls_available and calls:
-        try:
-            await calls.start()
-            logger.info("✅ pytgcalls started")
-        except Exception as e:
-            logger.error(f"❌ pytgcalls start error: {e}")
-
-    logger.info("============================================================")
-    logger.info("🎵 MUSIC BOT WITH PYTGCALLS")
-    logger.info("============================================================")
-    logger.info(f"✅ Bot: @{bot_username}")
+    await bot.start()
+    me = await bot.get_me()
+    bot_username = me.username
+    logger.info(f"✅ Bot: @{me.username}")
     logger.info(f"✅ Bot ID: {me.id}")
     
     if userbot_available:
-        logger.info(f"✅ UserBot: {user_me.first_name if 'user_me' in locals() else 'configured'}")
+        await userbot.start()
+        user_info = await userbot.get_me()
+        logger.info(f"✅ UserBot: {user_info.first_name}")
         logger.info(f"🤖 Auto-join: ENABLED")
+        
+        if pytgcalls_available:
+            try:
+                await calls.start()
+                logger.info("✅ py-tgcalls: STARTED")
+                logger.info("🎉 FULL PLAYBACK MODE READY!")
+            except Exception as e:
+                logger.error(f"❌ py-tgcalls start error: {e}")
+        else:
+            logger.warning("⚠️ py-tgcalls: NOT AVAILABLE")
     else:
-        logger.warning("⚠️ UserBot: NOT AVAILABLE")
+        logger.warning("⚠️ Add SESSION_STRING for playback")
     
-    logger.warning(f"⚠️ pytgcalls: {'NOT AVAILABLE' if not pytgcalls_available else 'READY'}")
+    await start_web()
     
-    # Start web server (Render requirement)
-    app = web.Application()
-    app.router.add_get('/', index)
-    app.router.add_get('/health', health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    logger.info(f"✅ Web server on port {PORT}")
-
-    logger.info("============================================================")
+    logger.info("="*60)
     logger.info("✅ BOT READY!")
-    logger.info(f"🔗 https://t.me/{bot_username}")
-    logger.info("============================================================")
-
-    # Start polling
-    await bot.run_until_disconnected()
+    logger.info(f"🔗 https://t.me/{me.username}")
+    logger.info("="*60)
+    
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    try:
-        bot.run(start_bot_and_server())
-    except Exception as e:
-        logger.error(f"Fatal error during startup: {e}")
+    bot.run(main())
