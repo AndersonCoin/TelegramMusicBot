@@ -42,7 +42,6 @@ else:
     userbot = None
 
 # ========================= Compat Patch (fix GroupcallForbidden import) =========================
-# بعض إصدارات pytgcalls تحاول import GroupcallForbidden من pyrogram.errors وهو غير موجود في Pyrogram 2.x
 try:
     import pyrogram.errors as _p_err
     if not hasattr(_p_err, "GroupcallForbidden"):
@@ -85,6 +84,9 @@ music_queue: Dict[int, List[Dict]] = {}
 currently_playing: Dict[int, Dict] = {}
 bot_username = None
 
+# playback timers per chat (for auto-next)
+playback_timers: Dict[int, asyncio.Task] = {}
+
 # ========================= YouTube =========================
 ydl_opts = {
     'format': 'bestaudio/best', 'noplaylist': True, 'quiet': True,
@@ -112,6 +114,7 @@ async def download_song(query: str):
             return None
 
         return {
+            'id': info.get('id', ''),
             'title': info.get('title', 'Unknown'),
             'url': info.get('url'),
             'duration': info.get('duration', 0),
@@ -165,6 +168,32 @@ async def join_chat(chat_id: int):
         logger.error(f"Join error: {e}")
         return False
 
+# ========================= Timer helpers =========================
+def cancel_timer(chat_id: int):
+    t = playback_timers.pop(chat_id, None)
+    if t and not t.done():
+        t.cancel()
+
+def set_timer(chat_id: int, task: asyncio.Task):
+    cancel_timer(chat_id)
+    playback_timers[chat_id] = task
+
+def create_playback_timer(chat_id: int, song_id: str, sleep_sec: float) -> asyncio.Task:
+    async def runner():
+        try:
+            await asyncio.sleep(max(1, sleep_sec))
+            cur = currently_playing.get(chat_id)
+            if cur and cur.get('id') == song_id:
+                await play_next_song(chat_id)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # نظّف المؤقت إذا كان هو الحالي
+            cur_t = playback_timers.get(chat_id)
+            if cur_t is asyncio.current_task():
+                playback_timers.pop(chat_id, None)
+    return asyncio.create_task(runner())
+
 # ========================= PyTgCalls Safe Wrappers =========================
 async def safe_play(chat_id: int, url: str):
     # حديث: MediaStream + AudioQuality
@@ -202,6 +231,7 @@ async def play_next_song(chat_id: int):
 
     if chat_id not in music_queue or not music_queue[chat_id]:
         try:
+            cancel_timer(chat_id)
             await safe_leave(chat_id)
             if chat_id in currently_playing:
                 del currently_playing[chat_id]
@@ -213,10 +243,23 @@ async def play_next_song(chat_id: int):
     next_song = music_queue[chat_id].pop(0)
 
     try:
+        # أوقف أي مؤقّت سابق قبل تشغيل أغنية جديدة
+        cancel_timer(chat_id)
+
         await safe_play(chat_id, next_song['url'])
+
+        # حدّث الحالة واحسب المؤقّت
+        next_song['_started_at'] = time.time()
+        next_song['_paused_at'] = None
         currently_playing[chat_id] = next_song
         stats['songs_played'] += 1
         logger.info(f"▶️ Playing: {next_song['title']}")
+
+        # جدولة المؤقّت بناءً على المدة
+        dur = int(next_song.get('duration') or 0)
+        if dur > 0:
+            task = create_playback_timer(chat_id, next_song.get('id', ''), dur + 2)
+            set_timer(chat_id, task)
 
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("⏸️", callback_data="pause"),
@@ -226,7 +269,7 @@ async def play_next_song(chat_id: int):
 
         await bot.send_message(
             chat_id,
-            f"▶️ **يتم التشغيل:**\n🎵 {next_song['title']}",
+            f"▶️ **يتم التشغيل:**\n🎵 {next_song['title']}\n⏱️ {format_duration(dur)}",
             reply_markup=keyboard
         )
         return True
@@ -242,48 +285,22 @@ async def play_next_song(chat_id: int):
         if "already" in msg or "joined" in msg or "in call" in msg or "already joined" in msg:
             try:
                 await safe_change_stream(chat_id, next_song['url'])
+                next_song['_started_at'] = time.time()
+                next_song['_paused_at'] = None
                 currently_playing[chat_id] = next_song
                 stats['songs_played'] += 1
+                dur = int(next_song.get('duration') or 0)
+                if dur > 0:
+                    task = create_playback_timer(chat_id, next_song.get('id', ''), dur + 2)
+                    set_timer(chat_id, task)
                 await bot.send_message(chat_id, f"▶️ **تغيير إلى:**\n🎵 {next_song['title']}")
                 return True
             except Exception as e2:
                 logger.error(f"❌ Change stream error: {e2}")
                 return await play_next_song(chat_id)
 
+        # جرّب الأغنية التالية عند أي خطأ آخر
         return await play_next_song(chat_id)
-
-# Handler for stream end (signature-agnostic)
-if pytgcalls_available and calls:
-    @calls.on_stream_end()
-    async def on_stream_end_handler(*args, **kwargs):
-        """
-        بعض الإصدارات تُمرّر chat_id مباشرة، وأخرى تمرّر Update له خاصية chat_id.
-        نحاول استخراج chat_id من جميع الأشكال.
-        """
-        chat_id = None
-
-        if 'chat_id' in kwargs:
-            chat_id = kwargs.get('chat_id')
-        else:
-            for a in args:
-                if isinstance(a, int):
-                    chat_id = a
-                    break
-                if hasattr(a, 'chat_id'):
-                    chat_id = getattr(a, 'chat_id', None)
-                    if chat_id is not None:
-                        break
-
-        if chat_id is None:
-            logger.warning("⚠️ on_stream_end: لم أستطع تحديد chat_id")
-            return
-
-        try:
-            if chat_id in currently_playing:
-                await bot.send_message(chat_id, f"✅ **انتهى:** {currently_playing[chat_id]['title']}")
-            await play_next_song(chat_id)
-        except Exception as e:
-            logger.error(f"Stream end handler error: {e}")
 
 # ========================= Commands =========================
 @bot.on_message(filters.command("start") & filters.private)
@@ -368,7 +385,7 @@ async def play_cmd(client, message: Message):
         await msg.edit(
             f"✅ **إضافة للقائمة #{position}**\n\n"
             f"🎵 {song_info['title']}\n"
-            f"⏱️ {format_duration(song_info['duration'])}"
+            f"⏱️ {format_duration(int(song_info.get('duration') or 0))}"
         )
 
 @bot.on_message(filters.command("pause") & (filters.group | filters.channel))
@@ -377,6 +394,11 @@ async def pause_cmd(client, message: Message):
     if not pytgcalls_available:
         return
     try:
+        # cancel timer and mark pause time
+        cancel_timer(message.chat.id)
+        cur = currently_playing.get(message.chat.id)
+        if cur and not cur.get('_paused_at'):
+            cur['_paused_at'] = time.time()
         await safe_pause(message.chat.id)
         await message.reply_text("⏸️ توقف مؤقت")
     except Exception as e:
@@ -389,6 +411,23 @@ async def resume_cmd(client, message: Message):
         return
     try:
         await safe_resume(message.chat.id)
+        # reschedule timer with remaining time
+        cur = currently_playing.get(message.chat.id)
+        if cur:
+            dur = int(cur.get('duration') or 0)
+            started = cur.get('_started_at') or time.time()
+            paused_at = cur.get('_paused_at')
+            if dur > 0:
+                elapsed = 0
+                if paused_at:
+                    elapsed = max(0, paused_at - started)
+                else:
+                    elapsed = max(0, time.time() - started)
+                remain = max(3, dur - int(elapsed))
+                cur['_started_at'] = time.time() - elapsed  # adjust start base
+                cur['_paused_at'] = None
+                task = create_playback_timer(message.chat.id, cur.get('id', ''), remain + 1)
+                set_timer(message.chat.id, task)
         await message.reply_text("▶️ استئناف")
     except Exception as e:
         await message.reply_text(f"❌ {e}")
@@ -396,16 +435,19 @@ async def resume_cmd(client, message: Message):
 @bot.on_message(filters.command("skip") & (filters.group | filters.channel))
 async def skip_cmd(client, message: Message):
     stats['messages'] += 1
-    if message.chat.id not in currently_playing:
+    chat_id = message.chat.id
+    if chat_id not in currently_playing:
         return await message.reply_text("❌ لا يوجد شيء لتخطيه")
-    await message.reply_text(f"⏭️ تخطي: {currently_playing[message.chat.id]['title']}")
-    await play_next_song(message.chat.id)
+    cancel_timer(chat_id)
+    await message.reply_text(f"⏭️ تخطي: {currently_playing[chat_id]['title']}")
+    await play_next_song(chat_id)
 
 @bot.on_message(filters.command("stop") & (filters.group | filters.channel))
 async def stop_cmd(client, message: Message):
     stats['messages'] += 1
     chat_id = message.chat.id
     try:
+        cancel_timer(chat_id)
         if pytgcalls_available:
             await safe_leave(chat_id)
         if chat_id in music_queue:
@@ -423,12 +465,13 @@ async def queue_cmd(client, message: Message):
     text = ""
 
     if chat_id in currently_playing:
-        text += f"▶️ {currently_playing[chat_id]['title']}\n\n"
+        cur = currently_playing[chat_id]
+        text += f"▶️ {cur['title']} ({format_duration(int(cur.get('duration') or 0))})\n\n"
 
     if chat_id in music_queue and music_queue[chat_id]:
         text += "📋 القائمة:\n"
         for i, s in enumerate(music_queue[chat_id][:10], 1):
-            text += f"{i}. {s['title']}\n"
+            text += f"{i}. {s['title']} ({format_duration(int(s.get('duration') or 0))})\n"
 
     await message.reply_text(text or "📭 فارغة")
 
