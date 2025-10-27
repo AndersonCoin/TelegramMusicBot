@@ -43,51 +43,40 @@ else:
     userbot = None
     logger.warning("⚠️ No UserBot - Add SESSION_STRING for music playback")
 
-# py-tgcalls setup
+# PyTgCalls setup - متوافق مع master branch
 pytgcalls_available = False
 calls = None
 
 if userbot_available:
     try:
-        from pytgcalls import PyTgCalls  # ✅ تصحيح: pytgcalls بدلاً من py_tgcalls
+        from pytgcalls import PyTgCalls
+        from pytgcalls.types import MediaStream, AudioQuality, Update
+        from pytgcalls.exceptions import NoActiveGroupCall, AlreadyJoinedError
         
         calls = PyTgCalls(userbot)
         pytgcalls_available = True
-        logger.info("✅ py-tgcalls imported successfully")
+        logger.info("✅ pytgcalls imported successfully")
     except ImportError as e:
-        logger.error(f"❌ py-tgcalls import error: {e}")
-        logger.error("Install: pip install py-tgcalls")
+        logger.error(f"❌ pytgcalls import error: {e}")
     except Exception as e:
-        logger.error(f"❌ py-tgcalls error: {e}")
+        logger.error(f"❌ pytgcalls error: {e}")
 
 # Global data
 stats = {
-    'messages': 0,
-    'commands': 0,
-    'users': set(),
-    'groups': set(),
-    'songs_searched': 0,
-    'songs_played': 0,
-    'start_time': time.time()
+    'messages': 0, 'commands': 0, 'users': set(), 'groups': set(),
+    'songs_searched': 0, 'songs_played': 0, 'start_time': time.time()
 }
-
 music_queue: Dict[int, List[Dict]] = {}
 currently_playing: Dict[int, Dict] = {}
 bot_username = None
 
 # YouTube downloader
 ydl_opts = {
-    'format': 'bestaudio/best',
-    'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'extract_flat': False,
-    'geo_bypass': True,
-    'ignoreerrors': True,
+    'format': 'bestaudio/best', 'noplaylist': True, 'quiet': True,
+    'no_warnings': True, 'extract_flat': False, 'geo_bypass': True, 'ignoreerrors': True,
 }
 
 async def download_song(query: str):
-    """بحث وتحميل معلومات الأغنية من YouTube"""
     try:
         logger.info(f"🔍 Searching: {query}")
         stats['songs_searched'] += 1
@@ -105,53 +94,38 @@ async def download_song(query: str):
         loop = asyncio.get_event_loop()
         info = await loop.run_in_executor(None, extract)
         
-        if not info:
-            return None
+        if not info: return None
         
         return {
-            'title': info.get('title', 'Unknown'),
-            'url': info.get('url'),
-            'duration': info.get('duration', 0),
-            'thumbnail': info.get('thumbnail', ''),
-            'webpage_url': info.get('webpage_url', ''),
-            'uploader': info.get('uploader', 'Unknown'),
-            'view_count': info.get('view_count', 0),
-            'like_count': info.get('like_count', 0)
+            'title': info.get('title', 'Unknown'), 'url': info.get('url'),
+            'duration': info.get('duration', 0), 'thumbnail': info.get('thumbnail', ''),
+            'webpage_url': info.get('webpage_url', ''), 'uploader': info.get('uploader', 'Unknown'),
+            'view_count': info.get('view_count', 0), 'like_count': info.get('like_count', 0)
         }
     except Exception as e:
         logger.error(f"Download error: {e}")
         return None
 
 def format_duration(seconds):
-    """تنسيق المدة الزمنية"""
-    if not seconds:
-        return "مباشر"
+    if not seconds: return "مباشر"
     mins, secs = divmod(int(seconds), 60)
     hours, mins = divmod(mins, 60)
     return f"{hours:02d}:{mins:02d}:{secs:02d}" if hours else f"{mins:02d}:{secs:02d}"
 
 def format_number(num):
-    """تنسيق الأرقام"""
-    if not num:
-        return "0"
-    if num >= 1_000_000:
-        return f"{num/1_000_000:.1f}M"
-    if num >= 1_000:
-        return f"{num/1_000:.1f}K"
+    if not num: return "0"
+    if num >= 1_000_000: return f"{num/1_000_000:.1f}M"
+    if num >= 1_000: return f"{num/1_000:.1f}K"
     return str(num)
 
 async def join_chat(chat_id: int):
-    """إضافة UserBot للمجموعة/القناة تلقائياً"""
-    if not userbot_available:
-        return False
-    
+    if not userbot_available: return False
     try:
         try:
             await userbot.get_chat_member(chat_id, "me")
             logger.info(f"✅ UserBot already in {chat_id}")
             return True
-        except UserNotParticipant:
-            pass
+        except UserNotParticipant: pass
         
         chat = await bot.get_chat(chat_id)
         
@@ -160,8 +134,7 @@ async def join_chat(chat_id: int):
                 await userbot.join_chat(chat.username)
                 logger.info(f"✅ Joined @{chat.username}")
                 return True
-            except Exception as e:
-                logger.error(f"Join via username failed: {e}")
+            except: pass
         
         try:
             invite_link = await bot.export_chat_invite_link(chat_id)
@@ -169,122 +142,84 @@ async def join_chat(chat_id: int):
             logger.info(f"✅ Joined via invite")
             return True
         except ChatAdminRequired:
-            logger.error("❌ Need admin rights")
+            logger.error("❌ Bot needs admin")
             return False
-        except Exception as e:
-            logger.error(f"Join via invite failed: {e}")
-            return False
+        except: return False
         
-    except UserAlreadyParticipant:
-        return True
+    except UserAlreadyParticipant: return True
     except Exception as e:
         logger.error(f"Join error: {e}")
         return False
 
 async def play_next_song(chat_id: int):
-    """تشغيل الأغنية التالية في القائمة"""
-    if not pytgcalls_available or not calls:
-        logger.warning("⚠️ py-tgcalls not available")
-        return False
+    if not pytgcalls_available or not calls: return False
     
-    # Check queue
     if chat_id not in music_queue or not music_queue[chat_id]:
-        # Queue empty - leave call
         try:
-            await calls.leave_group_call(chat_id)
-            if chat_id in currently_playing:
-                del currently_playing[chat_id]
-            logger.info(f"🔚 Queue empty, left chat {chat_id}")
-            
-            # Notify in chat
-            try:
-                await bot.send_message(chat_id, "📭 **انتهت قائمة الانتظار**")
-            except:
-                pass
-        except Exception as e:
-            logger.error(f"Leave call error: {e}")
+            await calls.leave_call(chat_id)
+            if chat_id in currently_playing: del currently_playing[chat_id]
+            logger.info(f"🔚 Left chat {chat_id}")
+            await bot.send_message(chat_id, "📭 انتهت القائمة")
+        except: pass
         return False
     
-    # Get next song
     next_song = music_queue[chat_id].pop(0)
     
     try:
-        # Play using py-tgcalls
         await calls.play(
             chat_id,
-            next_song['url']
+            MediaStream(next_song['url'], audio_parameters=AudioQuality.HIGH)
         )
         
         currently_playing[chat_id] = next_song
         stats['songs_played'] += 1
         logger.info(f"▶️ Now playing: {next_song['title']}")
         
-        # Notify in chat
-        try:
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⏸️ إيقاف مؤقت", callback_data=f"pause_{chat_id}"),
-                 InlineKeyboardButton("⏭️ تخطي", callback_data=f"skip_{chat_id}")],
-                [InlineKeyboardButton("⏹️ إيقاف", callback_data=f"stop_{chat_id}"),
-                 InlineKeyboardButton("🎵 YouTube", url=next_song['webpage_url'])]
-            ])
-            
-            await bot.send_message(
-                chat_id,
-                f"▶️ **يتم التشغيل الآن:**\n\n"
-                f"🎵 **{next_song['title']}**\n"
-                f"👤 {next_song['uploader']}\n"
-                f"⏱️ {format_duration(next_song['duration'])}",
-                reply_markup=keyboard
-            )
-        except Exception as e:
-            logger.error(f"Notification error: {e}")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏸️ إيقاف", callback_data="pause"),
+             InlineKeyboardButton("⏭️ تخطي", callback_data="skip")],
+            [InlineKeyboardButton("⏹️ إيقاف", callback_data="stop"),
+             InlineKeyboardButton("📋 القائمة", callback_data="queue")]
+        ])
         
+        await bot.send_message(
+            chat_id,
+            f"▶️ **يتم التشغيل الآن:**\n\n🎵 {next_song['title']}\n⏱️ {format_duration(next_song['duration'])}",
+            reply_markup=keyboard
+        )
         return True
         
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"❌ Play error: {error_msg}")
-        
-        # Handle specific errors
-        if "NO_ACTIVE_GROUP_CALL" in error_msg or "No active" in error_msg or "GROUP_CALL" in error_msg:
-            logger.error("❌ No voice chat active!")
-            try:
-                await bot.send_message(
-                    chat_id,
-                    "❌ **لا توجد محادثة صوتية نشطة!**\n\n"
-                    "ابدأ محادثة صوتية/بث مباشر أولاً ثم جرب مرة أخرى."
-                )
-            except:
-                pass
+    except AlreadyJoinedError:
+        logger.info("ℹ️ Already in call, changing stream...")
+        try:
+            await calls.change_stream(
+                chat_id,
+                MediaStream(next_song['url'], audio_parameters=AudioQuality.HIGH)
+            )
+            currently_playing[chat_id] = next_song
+            stats['songs_played'] += 1
+            await bot.send_message(chat_id, f"▶️ **تغيير إلى:**\n🎵 {next_song['title']}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Change stream error: {e}")
             return False
-        
-        # Try next song on other errors
-        logger.info("Trying next song...")
+    except NoActiveGroupCall:
+        logger.error("❌ No active voice chat!")
+        await bot.send_message(chat_id, "❌ **لا توجد محادثة صوتية نشطة!**")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Play error: {e}")
         return await play_next_song(chat_id)
 
-# Stream ended callback for py-tgcalls
 if pytgcalls_available and calls:
     @calls.on_stream_end()
-    async def on_stream_end(client, update):
-        """عند انتهاء الأغنية"""
+    async def on_stream_end_handler(client, update: Update):
         try:
             chat_id = update.chat_id
             logger.info(f"🔚 Stream ended in {chat_id}")
-            
-            # Notify
             if chat_id in currently_playing:
-                ended_song = currently_playing[chat_id]
-                try:
-                    await bot.send_message(
-                        chat_id,
-                        f"✅ **انتهى تشغيل:**\n🎵 {ended_song['title']}"
-                    )
-                except:
-                    pass
-            
-            # Play next
+                await bot.send_message(chat_id, f"✅ **انتهى:** {currently_playing[chat_id]['title']}")
             await play_next_song(chat_id)
-            
         except Exception as e:
             logger.error(f"Stream end handler error: {e}")
 
@@ -296,705 +231,205 @@ async def start_cmd(client, message: Message):
     stats['users'].add(message.from_user.id)
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ أضفني لمجموعتك/قناتك", 
-            url=f"https://t.me/{bot_username}?startgroup=true")],
-        [InlineKeyboardButton("📚 الأوامر", callback_data="help"),
-         InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
-        [InlineKeyboardButton("ℹ️ حول البوت", callback_data="about")]
+        [InlineKeyboardButton("➕ أضفني", url=f"https://t.me/{bot_username}?startgroup=true")],
+        [InlineKeyboardButton("📚 الأوامر", callback_data="help")]
     ])
-    
-    playback_status = "✅ التشغيل الفعلي متاح" if (userbot_available and pytgcalls_available) else "⚠️ عرض معلومات فقط"
     
     await message.reply_text(
         f"🎵 **مرحباً {message.from_user.mention}!**\n\n"
-        f"أنا بوت تشغيل الموسيقى في القنوات والمجموعات\n\n"
-        f"**الحالة:** {playback_status}\n\n"
-        f"**المميزات:**\n"
-        f"✅ {'تشغيل فعلي في المحادثات الصوتية' if pytgcalls_available else 'معلومات وروابط الأغاني'}\n"
-        f"✅ {'انضمام تلقائي للمجموعات/القنوات' if userbot_available else 'دعم المجموعات'}\n"
-        f"✅ بحث متقدم في YouTube\n"
-        f"✅ قوائم انتظار ذكية\n"
-        f"✅ انتقال تلقائي بين الأغاني\n"
-        f"✅ إحصائيات مفصلة\n\n"
+        f"أنا بوت تشغيل موسيقى للقنوات والمجموعات.\n\n"
+        f"**الحالة:** {'✅ التشغيل الفعلي متاح' if (userbot_available and pytgcalls_available) else '⚠️ معلومات فقط'}\n\n"
         f"**للبدء:**\n"
-        f"1️⃣ أضفني لقناتك/مجموعتك كمشرف\n"
-        f"2️⃣ ابدأ محادثة صوتية أو بث مباشر\n"
-        f"3️⃣ استخدم `/play [اسم الأغنية]`\n\n"
-        f"{'🎉 سينضم العميل المساعد ويشغل الموسيقى تلقائياً!' if (userbot_available and pytgcalls_available) else '💡 أضف SESSION_STRING للتشغيل الفعلي'}\n\n"
-        f"اضغط على الأزرار أدناه للمزيد 👇",
+        f"1. أضفني لمجموعتك كمشرف\n"
+        f"2. ابدأ محادثة صوتية\n"
+        f"3. استخدم `/play [أغنية]`\n\n"
+        f"{'🎉 العميل المساعد سينضم تلقائياً!' if userbot_available else '⚠️ أضف SESSION_STRING للتشغيل'}",
         reply_markup=keyboard
     )
 
 @bot.on_message(filters.command("help"))
 async def help_cmd(client, message: Message):
-    stats['messages'] += 1
-    
-    help_text = f"""
-📚 **دليل الاستخدام الكامل**
-
-**🎵 أوامر الموسيقى:**
-• `/play [أغنية]` - {'تشغيل أغنية' if pytgcalls_available else 'البحث عن أغنية'}
-• `/search [اسم]` - بحث متقدم (5 نتائج)
-• `/pause` - إيقاف مؤقت {'✅' if pytgcalls_available else '❌'}
-• `/resume` - استئناف التشغيل {'✅' if pytgcalls_available else '❌'}
-• `/skip` - تخطي الأغنية {'✅' if pytgcalls_available else '❌'}
-• `/stop` - إيقاف وحذف القائمة {'✅' if pytgcalls_available else '❌'}
-• `/queue` - عرض قائمة الانتظار
-• `/current` - الأغنية الحالية
-• `/clear` - حذف القائمة
-
-**ℹ️ أوامر المعلومات:**
-• `/start` - بدء البوت
-• `/help` - هذه المساعدة
-• `/ping` - فحص السرعة
-• `/stats` - الإحصائيات
-• `/id` - معرف المستخدم/المجموعة
-
-**💡 أمثلة:**
-• `/play فيروز صباح الخير`
-• `/play Imagine Dragons Believer`
-• `/search عبدالحليم حافظ`
-• `/play https://youtube.com/watch?v=...`
-
-**📝 ملاحظات:**
-• {'للتشغيل الفعلي: ابدأ محادثة صوتية أولاً' if pytgcalls_available else 'التشغيل الفعلي غير متاح - يمكنك الاستماع عبر روابط YouTube'}
-• البوت يعمل في المجموعات والقنوات
-• {'العميل المساعد ينضم تلقائياً' if userbot_available else 'أضف البوت كمشرف'}
-"""
-    await message.reply_text(help_text)
+    await message.reply_text(
+        "📚 **الأوامر:**\n\n"
+        "• `/play [أغنية]` - تشغيل/إضافة\n"
+        "• `/pause` - إيقاف مؤقت\n"
+        "• `/resume` - استئناف\n"
+        "• `/skip` - تخطي\n"
+        "• `/stop` - إيقاف كامل\n"
+        "• `/queue` - القائمة\n"
+        "• `/current` - الأغنية الحالية\n"
+        "• `/ping` - الحالة"
+    )
 
 @bot.on_message(filters.command("ping"))
 async def ping_cmd(client, message: Message):
-    stats['messages'] += 1
-    
     start = time.time()
-    msg = await message.reply_text("🏓 جاري الفحص...")
+    msg = await message.reply_text("🏓")
     end = time.time()
-    latency = round((end - start) * 1000, 2)
-    
-    uptime = time.time() - stats['start_time']
-    hours = int(uptime // 3600)
-    mins = int((uptime % 3600) // 60)
     
     await msg.edit(
         f"🏓 **Pong!**\n\n"
-        f"⚡ **السرعة:** `{latency}ms`\n"
-        f"🤖 **البوت:** ✅ نشط\n"
-        f"👤 **UserBot:** {'✅ متصل' if userbot_available else '❌ غير متصل'}\n"
-        f"🎵 **py-tgcalls:** {'✅ جاهز' if pytgcalls_available else '❌ غير متاح'}\n"
-        f"⏱️ **وقت التشغيل:** {hours}h {mins}m\n"
-        f"📊 **الرسائل:** {stats['messages']}\n"
-        f"🔍 **الأغاني المبحوثة:** {stats['songs_searched']}\n"
-        f"▶️ **الأغاني المشغلة:** {stats['songs_played']}\n"
-        f"🎶 **قيد التشغيل الآن:** {len(currently_playing)}"
+        f"⚡ `{round((end-start)*1000, 2)}ms`\n"
+        f"🤖 Bot: ✅\n"
+        f"👤 UserBot: {'✅' if userbot_available else '❌'}\n"
+        f"🎵 PyTgCalls: {'✅' if pytgcalls_available else '❌'}\n"
+        f"▶️ Playing: {len(currently_playing)}"
     )
 
-@bot.on_message(filters.command("stats"))
-async def stats_cmd(client, message: Message):
-    stats['messages'] += 1
-    
-    uptime = time.time() - stats['start_time']
-    hours = int(uptime // 3600)
-    mins = int((uptime % 3600) // 60)
-    
-    await message.reply_text(
-        f"📊 **إحصائيات البوت**\n\n"
-        f"**👥 المستخدمون:**\n"
-        f"• إجمالي المستخدمين: {len(stats['users'])}\n"
-        f"• المجموعات/القنوات: {len(stats['groups'])}\n\n"
-        f"**📈 النشاط:**\n"
-        f"• إجمالي الرسائل: {stats['messages']}\n"
-        f"• الأوامر المنفذة: {stats['commands']}\n"
-        f"• الأغاني المبحوثة: {stats['songs_searched']}\n"
-        f"• الأغاني المشغلة: {stats['songs_played']}\n\n"
-        f"**⏱️ النظام:**\n"
-        f"• وقت التشغيل: {hours}h {mins}m\n"
-        f"• قوائم الانتظار: {len(music_queue)}\n"
-        f"• قيد التشغيل: {len(currently_playing)}\n"
-        f"• في الانتظار: {sum(len(q) for q in music_queue.values())}\n\n"
-        f"**🔧 الحالة:**\n"
-        f"• البوت: ✅ نشط\n"
-        f"• UserBot: {'✅ متصل' if userbot_available else '❌ غير متصل'}\n"
-        f"• py-tgcalls: {'✅ جاهز' if pytgcalls_available else '❌ غير متاح'}\n"
-        f"• التشغيل الفعلي: {'✅ متاح' if (userbot_available and pytgcalls_available) else '❌ غير متاح'}"
-    )
-
-@bot.on_message(filters.command("id"))
-async def id_cmd(client, message: Message):
-    stats['messages'] += 1
-    
-    text = f"**🆔 معلومات المعرفات:**\n\n"
-    text += f"👤 **معرفك:** `{message.from_user.id}`\n"
-    text += f"📛 **اسمك:** {message.from_user.first_name}\n"
-    
-    if message.from_user.username:
-        text += f"🔗 **يوزرك:** @{message.from_user.username}\n"
-    
-    if message.chat.type != "private":
-        text += f"\n💬 **معرف المجموعة/القناة:** `{message.chat.id}`\n"
-        if message.chat.title:
-            text += f"📝 **الاسم:** {message.chat.title}\n"
-        if message.chat.username:
-            text += f"🔗 **الرابط:** @{message.chat.username}"
-    
-    await message.reply_text(text)
-
-@bot.on_message(filters.command(["play", "p"]))
+@bot.on_message(filters.command(["play", "p"]) & (filters.group | filters.channel))
 async def play_cmd(client, message: Message):
     stats['messages'] += 1
-    stats['commands'] += 1
+    stats['groups'].add(message.chat.id)
     
-    if message.chat.type != "private":
-        stats['groups'].add(message.chat.id)
+    if not userbot_available or not pytgcalls_available:
+        return await message.reply_text(
+            f"❌ **التشغيل الفعلي غير متاح!**\n\n"
+            f"UserBot: {'✅' if userbot_available else '❌'}\n"
+            f"PyTgCalls: {'✅' if pytgcalls_available else '❌'}"
+        )
     
     if len(message.command) < 2:
-        return await message.reply_text(
-            "❌ **الاستخدام:**\n"
-            "`/play [اسم الأغنية أو رابط YouTube]`\n\n"
-            "**أمثلة:**\n"
-            "• `/play فيروز صباح الخير`\n"
-            "• `/play Imagine Dragons Believer`\n"
-            "• `/play https://youtube.com/watch?v=...`"
-        )
+        return await message.reply_text("❌ استخدم: `/play [اسم الأغنية]`")
     
     query = " ".join(message.command[1:])
     chat_id = message.chat.id
     
-    # For groups/channels only
-    if message.chat.type == "private":
-        msg = await message.reply_text("🔍 **جاري البحث...**")
-        song_info = await download_song(query)
-        
-        if not song_info:
-            return await msg.edit("❌ **لم أجد الأغنية!**")
-        
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🎵 استمع على YouTube", url=song_info['webpage_url'])
-        ]])
-        
-        if song_info.get('thumbnail'):
-            try:
-                await msg.delete()
-                await message.reply_photo(
-                    photo=song_info['thumbnail'],
-                    caption=f"🎵 **{song_info['title']}**\n"
-                            f"👤 {song_info['uploader']}\n"
-                            f"⏱️ {format_duration(song_info['duration'])}\n"
-                            f"👁️ {format_number(song_info.get('view_count', 0))} مشاهدة",
-                    reply_markup=keyboard
-                )
-            except:
-                await msg.edit(
-                    f"🎵 **{song_info['title']}**\n"
-                    f"👤 {song_info['uploader']}\n"
-                    f"⏱️ {format_duration(song_info['duration'])}\n"
-                    f"🔗 [YouTube]({song_info['webpage_url']})",
-                    reply_markup=keyboard
-                )
-        return
+    msg = await message.reply_text("🔄 جاري التحضير...")
     
-    # For groups/channels
-    msg = await message.reply_text(
-        "🔄 **جاري التحضير...**\n"
-        f"{'⏳ إضافة العميل المساعد...' if userbot_available else '🔍 البحث...'}"
-    )
-    
-    # Join chat if userbot available
     if userbot_available:
-        joined = await join_chat(chat_id)
-        if not joined:
-            return await msg.edit(
-                "❌ **فشل انضمام العميل المساعد!**\n\n"
-                "**تأكد من:**\n"
-                "• البوت مشرف\n"
-                "• صلاحية دعوة المستخدمين\n"
-                "• القناة/المجموعة عامة أو لديك صلاحيات"
-            )
-        await msg.edit("🔍 **جاري البحث...**")
+        if not await join_chat(chat_id):
+            return await msg.edit("❌ فشل انضمام العميل المساعد!")
     
-    # Search song
+    await msg.edit("🔍 البحث...")
+    
     song_info = await download_song(query)
-    
     if not song_info:
-        return await msg.edit("❌ **لم أجد الأغنية!**")
+        return await msg.edit("❌ لم أجد الأغنية!")
     
-    # Add to queue
     if chat_id not in music_queue:
         music_queue[chat_id] = []
     
     music_queue[chat_id].append(song_info)
     position = len(music_queue[chat_id])
     
-    # Try playing if py-tgcalls available
-    if pytgcalls_available and chat_id not in currently_playing:
-        await msg.edit("🎵 **بدء التشغيل...**")
-        
-        success = await play_next_song(chat_id)
-        
-        if success:
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⏸️ إيقاف", callback_data=f"pause_{chat_id}"),
-                 InlineKeyboardButton("⏭️ تخطي", callback_data=f"skip_{chat_id}")],
-                [InlineKeyboardButton("⏹️ إيقاف كامل", callback_data=f"stop_{chat_id}"),
-                 InlineKeyboardButton("📋 القائمة", callback_data=f"queue_{chat_id}")],
-                [InlineKeyboardButton("🎵 YouTube", url=song_info['webpage_url'])]
-            ])
-            
-            caption = (
-                f"▶️ **يتم التشغيل الآن:**\n\n"
-                f"🎵 **{song_info['title']}**\n"
-                f"👤 {song_info['uploader']}\n"
-                f"⏱️ {format_duration(song_info['duration'])}\n"
-                f"👁️ {format_number(song_info.get('view_count', 0))} مشاهدة\n\n"
-                f"👤 **طلب بواسطة:** {message.from_user.mention if message.from_user else 'مجهول'}\n"
-                f"🤖 **العميل:** انضم وبدأ التشغيل تلقائياً ✅"
-            )
-            
-            try:
-                await msg.delete()
-                if song_info.get('thumbnail'):
-                    await message.reply_photo(
-                        photo=song_info['thumbnail'],
-                        caption=caption,
-                        reply_markup=keyboard
-                    )
-                else:
-                    await message.reply_text(caption, reply_markup=keyboard)
-            except:
-                await msg.edit(caption, reply_markup=keyboard)
-        else:
-            await msg.edit(
-                "❌ **فشل التشغيل!**\n\n"
-                "**تأكد من:**\n"
-                "• وجود محادثة صوتية/بث نشط\n"
-                "• البوت والعميل مشرفين\n"
-                "• صلاحيات إدارة المحادثة الصوتية"
-            )
+    if chat_id not in currently_playing:
+        await msg.edit("🎵 بدء التشغيل...")
+        if not await play_next_song(chat_id):
+            await msg.edit("❌ فشل التشغيل - تأكد من وجود محادثة صوتية")
     else:
-        # Just add to queue or show info
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🎵 YouTube", url=song_info['webpage_url'])
-        ]])
-        
-        caption = (
-            f"✅ **تمت الإضافة للقائمة #{position}**\n\n"
-            f"🎵 **{song_info['title']}**\n"
-            f"👤 {song_info['uploader']}\n"
-            f"⏱️ {format_duration(song_info['duration'])}\n"
-            f"👁️ {format_number(song_info.get('view_count', 0))} مشاهدة\n\n"
-            f"{'سيتم تشغيلها بعد الأغنية الحالية' if pytgcalls_available else '💡 اضغط الزر للاستماع على YouTube'}"
+        await msg.edit(
+            f"✅ **إضافة للقائمة #{position}**\n\n"
+            f"🎵 {song_info['title']}\n"
+            f"⏱️ {format_duration(song_info['duration'])}"
         )
-        
-        try:
-            await msg.delete()
-            if song_info.get('thumbnail'):
-                await message.reply_photo(
-                    photo=song_info['thumbnail'],
-                    caption=caption,
-                    reply_markup=keyboard
-                )
-            else:
-                await message.reply_text(caption, reply_markup=keyboard)
-        except:
-            await msg.edit(caption, reply_markup=keyboard)
-
-@bot.on_message(filters.command(["search", "s"]))
-async def search_cmd(client, message: Message):
-    stats['messages'] += 1
-    stats['commands'] += 1
-    
-    if len(message.command) < 2:
-        return await message.reply_text("❌ **الاستخدام:** `/search [اسم الأغنية]`")
-    
-    query = " ".join(message.command[1:])
-    msg = await message.reply_text("🔍 **جاري البحث...**")
-    
-    try:
-        def extract_multi():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"ytsearch5:{query}", download=False)
-                return info.get('entries', [])
-        
-        loop = asyncio.get_event_loop()
-        results = await loop.run_in_executor(None, extract_multi)
-        
-        if not results:
-            return await msg.edit("❌ **لم أجد نتائج!**")
-        
-        text = f"🔍 **نتائج البحث عن:** `{query}`\n\n"
-        
-        for i, result in enumerate(results[:5], 1):
-            text += f"**{i}.** {result.get('title', 'Unknown')}\n"
-            text += f"   👤 {result.get('uploader', 'Unknown')}\n"
-            text += f"   ⏱️ {format_duration(result.get('duration', 0))}\n"
-            text += f"   🔗 {result.get('webpage_url', '')}\n\n"
-        
-        text += "💡 **استخدم** `/play [رابط]` **لتشغيل/إضافة أغنية**"
-        
-        await msg.edit(text, disable_web_page_preview=True)
-        
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        await msg.edit(f"❌ **خطأ في البحث**")
 
 @bot.on_message(filters.command("pause") & (filters.group | filters.channel))
 async def pause_cmd(client, message: Message):
-    stats['messages'] += 1
-    
-    if not pytgcalls_available:
-        return await message.reply_text("❌ **py-tgcalls غير متاح**")
-    
+    if not pytgcalls_available: return
     try:
         await calls.pause_stream(message.chat.id)
-        await message.reply_text("⏸️ **تم الإيقاف المؤقت**")
-    except Exception as e:
-        await message.reply_text(f"❌ خطأ: {str(e)}")
+        await message.reply_text("⏸️ توقف مؤقت")
+    except Exception as e: await message.reply_text(f"❌ {e}")
 
 @bot.on_message(filters.command("resume") & (filters.group | filters.channel))
 async def resume_cmd(client, message: Message):
-    stats['messages'] += 1
-    
-    if not pytgcalls_available:
-        return await message.reply_text("❌ **py-tgcalls غير متاح**")
-    
+    if not pytgcalls_available: return
     try:
         await calls.resume_stream(message.chat.id)
-        await message.reply_text("▶️ **تم الاستئناف**")
-    except Exception as e:
-        await message.reply_text(f"❌ خطأ: {str(e)}")
+        await message.reply_text("▶️ استئناف")
+    except Exception as e: await message.reply_text(f"❌ {e}")
 
 @bot.on_message(filters.command("skip") & (filters.group | filters.channel))
 async def skip_cmd(client, message: Message):
-    stats['messages'] += 1
+    if message.chat.id not in currently_playing:
+        return await message.reply_text("❌ لا يوجد شيء لتخطيه")
     
-    chat_id = message.chat.id
-    
-    if chat_id not in currently_playing:
-        return await message.reply_text("❌ **لا يوجد شيء قيد التشغيل**")
-    
-    skipped = currently_playing[chat_id]['title']
-    await message.reply_text(f"⏭️ **تخطي:** {skipped}")
-    
-    await play_next_song(chat_id)
+    await message.reply_text(f"⏭️ تخطي: {currently_playing[message.chat.id]['title']}")
+    await play_next_song(message.chat.id)
 
 @bot.on_message(filters.command("stop") & (filters.group | filters.channel))
 async def stop_cmd(client, message: Message):
-    stats['messages'] += 1
-    
     chat_id = message.chat.id
-    
     try:
-        if pytgcalls_available and calls:
-            await calls.leave_group_call(chat_id)
-        
-        count = len(music_queue.get(chat_id, []))
-        
-        if chat_id in music_queue:
-            music_queue[chat_id] = []
-        if chat_id in currently_playing:
-            del currently_playing[chat_id]
-        
-        await message.reply_text(f"⏹️ **تم الإيقاف!**\nحذف {count} أغنية")
-    except Exception as e:
-        await message.reply_text(f"❌ خطأ: {str(e)}")
+        if pytgcalls_available: await calls.leave_call(chat_id)
+        if chat_id in music_queue: music_queue[chat_id] = []
+        if chat_id in currently_playing: del currently_playing[chat_id]
+        await message.reply_text("⏹️ تم الإيقاف")
+    except Exception as e: await message.reply_text(f"❌ {e}")
 
-@bot.on_message(filters.command("queue"))
+@bot.on_message(filters.command("queue") & (filters.group | filters.channel))
 async def queue_cmd(client, message: Message):
-    stats['messages'] += 1
-    
     chat_id = message.chat.id
-    
     text = ""
     
     if chat_id in currently_playing:
-        current = currently_playing[chat_id]
-        text += f"▶️ **قيد التشغيل:**\n🎵 {current['title']}\n⏱️ {format_duration(current['duration'])}\n\n"
+        text += f"▶️ {currently_playing[chat_id]['title']}\n\n"
     
     if chat_id in music_queue and music_queue[chat_id]:
-        text += "📋 **قائمة الانتظار:**\n\n"
-        for i, song in enumerate(music_queue[chat_id][:10], 1):
-            text += f"**{i}.** {song['title']}\n⏱️ {format_duration(song['duration'])}\n\n"
-        
-        if len(music_queue[chat_id]) > 10:
-            text += f"\n_...و {len(music_queue[chat_id]) - 10} أخرى_"
-        
-        text += f"\n**الإجمالي:** {len(music_queue[chat_id])} أغنية"
-    else:
-        if not text:
-            text = "📭 **القائمة فارغة**"
+        text += "📋 القائمة:\n"
+        for i, s in enumerate(music_queue[chat_id][:10], 1):
+            text += f"{i}. {s['title']}\n"
     
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🗑️ حذف القائمة", callback_data=f"clear_{chat_id}")
-    ]])
-    
-    await message.reply_text(text, reply_markup=keyboard)
+    await message.reply_text(text or "📭 فارغة")
 
-@bot.on_message(filters.command("current"))
-async def current_cmd(client, message: Message):
-    stats['messages'] += 1
-    
-    chat_id = message.chat.id
-    
-    if chat_id not in currently_playing:
-        return await message.reply_text("❌ **لا يوجد شيء قيد التشغيل**")
-    
-    song = currently_playing[chat_id]
-    
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🎵 YouTube", url=song['webpage_url'])
-    ]])
-    
-    await message.reply_text(
-        f"▶️ **قيد التشغيل:**\n\n"
-        f"🎵 {song['title']}\n"
-        f"👤 {song['uploader']}\n"
-        f"⏱️ {format_duration(song['duration'])}\n"
-        f"👁️ {format_number(song.get('view_count', 0))} مشاهدة",
-        reply_markup=keyboard
-    )
-
-@bot.on_message(filters.command("clear"))
-async def clear_cmd(client, message: Message):
-    stats['messages'] += 1
-    
-    chat_id = message.chat.id
-    
-    if chat_id in music_queue and music_queue[chat_id]:
-        count = len(music_queue[chat_id])
-        music_queue[chat_id] = []
-        await message.reply_text(f"🗑️ **تم حذف {count} أغنية من القائمة**")
-    else:
-        await message.reply_text("📭 **القائمة فارغة بالفعل**")
-
-# Callback handlers
 @bot.on_callback_query()
-async def callback_handler(client, callback_query: CallbackQuery):
-    data = callback_query.data
+async def callback_handler(client, query: CallbackQuery):
+    await query.answer()
     
-    if data == "help":
-        await help_cmd(client, callback_query.message)
-        await callback_query.answer()
-    
-    elif data == "stats":
-        await stats_cmd(client, callback_query.message)
-        await callback_query.answer()
-    
-    elif data == "about":
-        await callback_query.message.edit_text(
-            f"ℹ️ **حول البوت**\n\n"
-            f"🤖 **الاسم:** Music Bot\n"
-            f"📦 **الإصدار:** 2.0.0\n"
-            f"🛠️ **المكتبة:** Pyrogram + py-tgcalls\n"
-            f"🔍 **المحرك:** yt-dlp\n\n"
-            f"**الحالة:**\n"
-            f"• البوت: ✅ نشط\n"
-            f"• UserBot: {'✅ متصل' if userbot_available else '❌ غير متصل'}\n"
-            f"• py-tgcalls: {'✅ جاهز' if pytgcalls_available else '❌ غير متاح'}\n\n"
-            f"تم التطوير بـ ❤️"
-        )
-        await callback_query.answer()
-    
-    elif data.startswith("pause_"):
-        if pytgcalls_available:
-            chat_id = int(data.split("_")[1])
-            try:
-                await calls.pause_stream(chat_id)
-                await callback_query.answer("⏸️ تم الإيقاف المؤقت", show_alert=True)
-            except:
-                await callback_query.answer("❌ خطأ", show_alert=True)
-        else:
-            await callback_query.answer("❌ غير متاح", show_alert=True)
-    
-    elif data.startswith("skip_"):
-        chat_id = int(data.split("_")[1])
-        if chat_id in currently_playing:
-            await play_next_song(chat_id)
-            await callback_query.answer("⏭️ تم التخطي", show_alert=True)
-        else:
-            await callback_query.answer("❌ لا يوجد شيء قيد التشغيل", show_alert=True)
-    
-    elif data.startswith("stop_"):
-        if pytgcalls_available:
-            chat_id = int(data.split("_")[1])
-            try:
-                await calls.leave_group_call(chat_id)
-                if chat_id in music_queue:
-                    music_queue[chat_id] = []
-                if chat_id in currently_playing:
-                    del currently_playing[chat_id]
-                await callback_query.answer("⏹️ تم الإيقاف", show_alert=True)
-            except:
-                await callback_query.answer("❌ خطأ", show_alert=True)
-        else:
-            await callback_query.answer("❌ غير متاح", show_alert=True)
-    
-    elif data.startswith("clear_"):
-        chat_id = int(data.split("_")[1])
-        if chat_id in music_queue:
-            count = len(music_queue[chat_id])
-            music_queue[chat_id] = []
-            await callback_query.message.edit_text(f"🗑️ **تم حذف {count} أغنية**")
-        await callback_query.answer("تم الحذف!")
-    
-    else:
-        await callback_query.answer()
+    if query.data == "help": await help_cmd(client, query.message)
+    elif query.data == "pause": await pause_cmd(client, query.message)
+    elif query.data == "resume": await resume_cmd(client, query.message)
+    elif query.data == "skip": await skip_cmd(client, query.message)
+    elif query.data == "stop": await stop_cmd(client, query.message)
+    elif query.data == "queue": await queue_cmd(client, query.message)
 
-# Web server
-async def health(request):
-    return web.Response(text=f"OK")
+# Web
+async def health(request): return web.Response(text="OK")
 
 async def index(request):
-    uptime = time.time() - stats['start_time']
-    hours = int(uptime // 3600)
-    mins = int((uptime % 3600) // 60)
-    
     html = f"""
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Music Bot Dashboard</title>
-    <meta http-equiv="refresh" content="30">
-    <style>
-        *{{margin:0;padding:0;box-sizing:border-box}}
-        body{{
-            font-family:'Segoe UI',Tahoma,sans-serif;
-            background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
-            color:#fff;
-            min-height:100vh;
-            display:flex;
-            justify-content:center;
-            align-items:center;
-            padding:20px
-        }}
-        .container{{
-            background:rgba(255,255,255,0.15);
-            padding:50px;
-            border-radius:30px;
-            backdrop-filter:blur(20px);
-            box-shadow:0 20px 60px rgba(0,0,0,0.5);
-            max-width:700px;
-            width:100%;
-            text-align:center
-        }}
-        h1{{font-size:4em;margin-bottom:20px}}
-        .status{{font-size:2em;color:#4ade80;margin:20px 0;font-weight:bold}}
-        .stats{{
-            display:grid;
-            grid-template-columns:repeat(3,1fr);
-            gap:15px;
-            margin:30px 0
-        }}
-        .stat{{
-            background:rgba(255,255,255,0.1);
-            padding:20px;
-            border-radius:15px
-        }}
-        .stat-number{{font-size:2.5em;font-weight:bold;color:#4ade80}}
-        .stat-label{{font-size:0.9em;margin-top:5px;opacity:0.8}}
-        .info{{
-            background:rgba(255,255,255,0.1);
-            padding:15px;
-            border-radius:10px;
-            margin:10px 0;
-            font-size:1.1em
-        }}
-        a{{
-            display:inline-block;
-            margin-top:30px;
-            padding:18px 40px;
-            background:linear-gradient(135deg,#4ade80,#22c55e);
-            color:#fff;
-            text-decoration:none;
-            border-radius:50px;
-            font-size:1.4em;
-            font-weight:bold;
-            transition:transform 0.2s
-        }}
-        a:hover{{transform:translateY(-2px)}}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🎵</h1>
-        <div class="status">Music Bot {'🎉 تشغيل فعلي!' if (userbot_available and pytgcalls_available) else '⚠️ معلومات فقط'}</div>
-        
-        <div class="stats">
-            <div class="stat">
-                <div class="stat-number">{stats['songs_played']}</div>
-                <div class="stat-label">مشغلة</div>
-            </div>
-            <div class="stat">
-                <div class="stat-number">{stats['songs_searched']}</div>
-                <div class="stat-label">مبحوثة</div>
-            </div>
-            <div class="stat">
-                <div class="stat-number">{len(stats['users'])}</div>
-                <div class="stat-label">مستخدمين</div>
-            </div>
-        </div>
-        
-        <div class="info">البوت: @{bot_username or 'Loading'}</div>
-        <div class="info">UserBot: {'✅ متصل' if userbot_available else '❌ غير متصل'}</div>
-        <div class="info">py-tgcalls: {'✅ جاهز' if pytgcalls_available else '❌ غير متاح'}</div>
-        <div class="info">قيد التشغيل: {len(currently_playing)}</div>
-        <div class="info">وقت التشغيل: {hours}h {mins}m</div>
-        
-        <a href="https://t.me/{bot_username or 'bot'}">فتح البوت →</a>
-    </div>
-</body>
-</html>
-    """
+<!DOCTYPE html><html lang="ar"><head><title>Music Bot</title><style>
+body{{font-family:Arial;background:#667eea;color:#fff;text-align:center;padding:50px}}
+h1{{font-size:4em}} .status{{font-size:2em;color:#4ade80;margin:30px}}
+</style></head><body><h1>🎵</h1><div class="status">
+{'🎉 تشغيل فعلي!' if (userbot_available and pytgcalls_available) else '⚠️ معلومات فقط'}
+</div><p>البوت: @{bot_username or 'Loading'}</p>
+<p>UserBot: {'✅' if userbot_available else '❌'}</p>
+<p>PyTgCalls: {'✅' if pytgcalls_available else '❌'}</p>
+</body></html>"""
     return web.Response(text=html, content_type='text/html')
 
 async def start_web():
-    app_web = web.Application()
-    app_web.router.add_get('/', index)
-    app_web.router.add_get('/health', health)
-    runner = web.AppRunner(app_web)
+    app = web.Application()
+    app.router.add_get('/', index)
+    app.router.add_get('/health', health)
+    runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', PORT).start()
-    logger.info(f"✅ Web server on port {PORT}")
+    logger.info(f"✅ Web on {PORT}")
 
 # Main
 async def main():
     global bot_username
     
-    logger.info("="*60)
-    logger.info("🎵 MUSIC BOT WITH PY-TGCALLS")
-    logger.info("="*60)
+    logger.info("🎵 MUSIC BOT - FULL PLAYBACK MODE")
     
     await bot.start()
     me = await bot.get_me()
     bot_username = me.username
     logger.info(f"✅ Bot: @{me.username}")
-    logger.info(f"✅ Bot ID: {me.id}")
     
     if userbot_available:
         await userbot.start()
-        user_info = await userbot.get_me()
-        logger.info(f"✅ UserBot: {user_info.first_name}")
-        logger.info(f"🤖 Auto-join: ENABLED")
+        logger.info(f"✅ UserBot: {(await userbot.get_me()).first_name}")
         
         if pytgcalls_available:
-            try:
-                await calls.start()
-                logger.info("✅ py-tgcalls: STARTED")
-                logger.info("🎉 FULL PLAYBACK MODE READY!")
-            except Exception as e:
-                logger.error(f"❌ py-tgcalls start error: {e}")
-        else:
-            logger.warning("⚠️ py-tgcalls: NOT AVAILABLE")
-    else:
-        logger.warning("⚠️ Add SESSION_STRING for playback")
+            await calls.start()
+            logger.info("✅ pytgcalls: STARTED")
+            logger.info("🎉 FULL PLAYBACK READY!")
     
     await start_web()
-    
-    logger.info("="*60)
     logger.info("✅ BOT READY!")
-    logger.info(f"🔗 https://t.me/{me.username}")
-    logger.info("="*60)
     
     await asyncio.Event().wait()
 
