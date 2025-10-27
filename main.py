@@ -1,14 +1,17 @@
 import os
+import re
+import base64
 import logging
 import asyncio
+import time
+from typing import Dict, List
+
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import UserAlreadyParticipant, ChatAdminRequired, UserNotParticipant
 from dotenv import load_dotenv
 from aiohttp import web
 import yt_dlp
-from typing import Dict, List
-import time
 
 load_dotenv()
 
@@ -25,6 +28,10 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SESSION_STRING = os.getenv("SESSION_STRING")
 PORT = int(os.getenv("PORT", 10000))
+
+# مسار تخزين الوسائط المؤقتة (لملفات تيليجرام)
+TMP_MEDIA_DIR = os.getenv("TMP_MEDIA_DIR", "/tmp/tgmedia")
+os.makedirs(TMP_MEDIA_DIR, exist_ok=True)
 
 # ========================= Clients =========================
 bot = Client("bot", api_id=int(API_ID), api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -63,7 +70,6 @@ if userbot_available:
         from pytgcalls import PyTgCalls
         calls = PyTgCalls(userbot)
 
-        # جرّب استيراد واجهة MediaStream/AudioQuality (قد لا تكون متوفرة في بعض الإصدارات)
         try:
             from pytgcalls.types import MediaStream, AudioQuality  # type: ignore
             HAVE_MEDIA_STREAM = True
@@ -87,10 +93,66 @@ bot_username = None
 # playback timers per chat (for auto-next)
 playback_timers: Dict[int, asyncio.Task] = {}
 
+# ========================= YouTube cookies support =========================
+COOKIES_FILE_CACHED = None
+
+async def prepare_youtube_cookies() -> str | None:
+    """
+    يحضّر ملف كوكيز بصيغة Netscape في /tmp إن تم تمريره عبر المتغيرات:
+    - YT_COOKIES_B64: نص cookies.txt مُشفّر Base64
+    - YT_COOKIES: نص cookies.txt مباشرة
+    - YT_COOKIES_URL: رابط مباشر لملف cookies.txt
+    """
+    global COOKIES_FILE_CACHED
+    if COOKIES_FILE_CACHED:
+        return COOKIES_FILE_CACHED
+
+    txt = None
+    b64 = os.getenv("YT_COOKIES_B64")
+    raw = os.getenv("YT_COOKIES")
+    url = os.getenv("YT_COOKIES_URL")
+
+    try:
+        if b64:
+            txt = base64.b64decode(b64).decode("utf-8", "ignore")
+        elif raw:
+            txt = raw
+        elif url:
+            import aiohttp
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(url, timeout=20) as r:
+                    r.raise_for_status()
+                    txt = await r.text()
+
+        if txt:
+            path = "/tmp/yt_cookies.txt"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(txt)
+            COOKIES_FILE_CACHED = path
+            logger.info("✅ YouTube cookies prepared")
+            return path
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to prepare cookies: {e}")
+
+    return None
+
 # ========================= YouTube =========================
 ydl_opts = {
-    'format': 'bestaudio/best', 'noplaylist': True, 'quiet': True,
-    'no_warnings': True, 'extract_flat': False, 'geo_bypass': True, 'ignoreerrors': True,
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True,
+    'extract_flat': False,
+    'geo_bypass': True,
+    'ignoreerrors': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android'],   # يمكنك تجربة ['ios'] أيضاً
+            'skip': ['hls_manifest_time_shift']
+        }
+    },
+    'retries': 5,
+    'fragment_retries': 5,
 }
 
 async def download_song(query: str):
@@ -98,8 +160,14 @@ async def download_song(query: str):
         logger.info(f"🔍 Searching: {query}")
         stats['songs_searched'] += 1
 
+        local_opts = dict(ydl_opts)
+        cookies_path = await prepare_youtube_cookies()
+        if cookies_path:
+            local_opts['cookiefile'] = cookies_path
+            local_opts['nocheckcertificate'] = True
+
         def extract():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with yt_dlp.YoutubeDL(local_opts) as ydl:
                 if query.startswith(('http://', 'https://')):
                     info = ydl.extract_info(query, download=False)
                 else:
@@ -125,7 +193,10 @@ async def download_song(query: str):
             'like_count': info.get('like_count', 0)
         }
     except Exception as e:
-        logger.error(f"Download error: {e}")
+        msg = str(e)
+        logger.error(f"Download error: {msg}")
+        if "sign in to confirm" in msg.lower() or "cookies" in msg.lower():
+            logger.warning("YouTube requires cookies. Set YT_COOKIES or YT_COOKIES_B64.")
         return None
 
 def format_duration(seconds):
@@ -188,7 +259,6 @@ def create_playback_timer(chat_id: int, song_id: str, sleep_sec: float) -> async
         except asyncio.CancelledError:
             pass
         finally:
-            # نظّف المؤقت إذا كان هو الحالي
             cur_t = playback_timers.get(chat_id)
             if cur_t is asyncio.current_task():
                 playback_timers.pop(chat_id, None)
@@ -196,10 +266,8 @@ def create_playback_timer(chat_id: int, song_id: str, sleep_sec: float) -> async
 
 # ========================= PyTgCalls Safe Wrappers =========================
 async def safe_play(chat_id: int, url: str):
-    # حديث: MediaStream + AudioQuality
     if HAVE_MEDIA_STREAM and hasattr(globals().get('MediaStream', object), '__call__'):
         return await calls.play(chat_id, MediaStream(url, audio_parameters=AudioQuality.HIGH))  # type: ignore
-    # قديم: تمرير الرابط مباشرة
     return await calls.play(chat_id, url)
 
 async def safe_change_stream(chat_id: int, url: str):
@@ -207,7 +275,6 @@ async def safe_change_stream(chat_id: int, url: str):
         if HAVE_MEDIA_STREAM and hasattr(globals().get('MediaStream', object), '__call__'):
             return await calls.change_stream(chat_id, MediaStream(url, audio_parameters=AudioQuality.HIGH))  # type: ignore
         return await calls.change_stream(chat_id, url)
-    # إن لم تتوفر change_stream، استخدم play كحل بديل
     return await safe_play(chat_id, url)
 
 async def safe_leave(chat_id: int):
@@ -223,6 +290,119 @@ async def safe_pause(chat_id: int):
 async def safe_resume(chat_id: int):
     if hasattr(calls, 'resume_stream'):
         return await calls.resume_stream(chat_id)
+
+# ========================= Utils =========================
+def extract_url_from_message(msg) -> str | None:
+    if not msg:
+        return None
+    text = None
+    if getattr(msg, "text", None):
+        text = msg.text
+    elif getattr(msg, "caption", None):
+        text = msg.caption
+    if text:
+        m = re.search(r'(https?://\S+)', text)
+        if m:
+            return m.group(1).rstrip(').,]}>')
+    return None
+
+def guess_ext_from_mime(mime: str | None) -> str:
+    if not mime:
+        return "ogg"
+    mime = mime.lower()
+    if "mpeg" in mime or "mp3" in mime:
+        return "mp3"
+    if "ogg" in mime or "opus" in mime:
+        return "ogg"
+    if "mp4" in mime or "m4a" in mime or "aac" in mime:
+        return "m4a"
+    if "wav" in mime:
+        return "wav"
+    return "ogg"
+
+def build_local_file_url(filename: str) -> str:
+    # يمكن الوصول داخلياً من نفس الكونتينر
+    return f"http://127.0.0.1:{PORT}/files/{filename}"
+
+# ========================= Telegram media enqueue =========================
+async def enqueue_tg_media(invoker_msg: Message, media_msg: Message):
+    """
+    تنزيل ملف الصوت/الصوت المسجّل من تيليجرام، وحفظه محلياً، وخدمته عبر الويب ثم إضافته للقائمة.
+    """
+    chat_id = invoker_msg.chat.id
+
+    # تحديد نوع الوسيط
+    tg_audio = media_msg.audio
+    tg_voice = media_msg.voice
+
+    if not tg_audio and not tg_voice:
+        return await invoker_msg.reply_text("❌ الرسالة لا تحتوي على ملف صوتي/رسالة صوتية")
+
+    # بيانات أساسية
+    if tg_audio:
+        duration = int(tg_audio.duration or 0)
+        title = tg_audio.title or tg_audio.file_name or "Telegram Audio"
+        performer = getattr(tg_audio, "performer", None)
+        uploader = performer or (invoker_msg.from_user.first_name if invoker_msg.from_user else "Telegram")
+        ext = os.path.splitext(tg_audio.file_name or "")[1].lstrip(".") or guess_ext_from_mime(tg_audio.mime_type)
+        file_unique_id = tg_audio.file_unique_id
+    else:
+        duration = int(tg_voice.duration or 0)
+        title = "Voice message"
+        uploader = invoker_msg.from_user.first_name if invoker_msg.from_user else "Telegram"
+        ext = "ogg"
+        file_unique_id = tg_voice.file_unique_id
+
+    # مسار واسم الملف
+    filename = f"{int(time.time())}_{invoker_msg.id}_{file_unique_id}.{ext}"
+    target_path = os.path.join(TMP_MEDIA_DIR, filename)
+
+    # تنزيل الملف
+    try:
+        await media_msg.download(file_name=target_path)
+    except Exception as e:
+        logger.error(f"Download tg media error: {e}")
+        return await invoker_msg.reply_text("❌ فشل تنزيل الملف من تيليجرام")
+
+    # عنوان URL داخلي لخدمة الملف
+    url = build_local_file_url(filename)
+
+    # بناء song_info وإضافته للقائمة
+    song_info = {
+        'id': file_unique_id,
+        'title': title,
+        'url': url,
+        'duration': duration,
+        'thumbnail': '',
+        'webpage_url': '',
+        'uploader': uploader,
+        'view_count': 0,
+        'like_count': 0
+    }
+
+    if chat_id not in music_queue:
+        music_queue[chat_id] = []
+    music_queue[chat_id].append(song_info)
+    position = len(music_queue[chat_id])
+
+    # تشغيل فوري إن لم يكن هناك تشغيل
+    if pytgcalls_available and (chat_id not in currently_playing):
+        if not await join_chat(chat_id):
+            return await invoker_msg.reply_text("❌ فشل انضمام العميل المساعد!")
+        ok = await play_next_song(chat_id)
+        if not ok:
+            return await invoker_msg.reply_text("❌ فشل التشغيل. تأكد من وجود محادثة صوتية نشطة.")
+        return await invoker_msg.reply_text(
+            f"▶️ **يتم التشغيل الآن:**\n\n"
+            f"🎵 {song_info['title']}\n"
+            f"⏱️ {format_duration(duration)}"
+        )
+    else:
+        return await invoker_msg.reply_text(
+            f"✅ **تمت الإضافة للقائمة #{position}**\n\n"
+            f"🎵 {song_info['title']}\n"
+            f"⏱️ {format_duration(duration)}"
+        )
 
 # ========================= Core Playback =========================
 async def play_next_song(chat_id: int):
@@ -243,19 +423,15 @@ async def play_next_song(chat_id: int):
     next_song = music_queue[chat_id].pop(0)
 
     try:
-        # أوقف أي مؤقّت سابق قبل تشغيل أغنية جديدة
         cancel_timer(chat_id)
-
         await safe_play(chat_id, next_song['url'])
 
-        # حدّث الحالة واحسب المؤقّت
         next_song['_started_at'] = time.time()
         next_song['_paused_at'] = None
         currently_playing[chat_id] = next_song
         stats['songs_played'] += 1
         logger.info(f"▶️ Playing: {next_song['title']}")
 
-        # جدولة المؤقّت بناءً على المدة
         dur = int(next_song.get('duration') or 0)
         if dur > 0:
             task = create_playback_timer(chat_id, next_song.get('id', ''), dur + 2)
@@ -299,7 +475,6 @@ async def play_next_song(chat_id: int):
                 logger.error(f"❌ Change stream error: {e2}")
                 return await play_next_song(chat_id)
 
-        # جرّب الأغنية التالية عند أي خطأ آخر
         return await play_next_song(chat_id)
 
 # ========================= Commands =========================
@@ -314,7 +489,8 @@ async def start_cmd(client, message: Message):
         f"**للبدء:**\n"
         f"1. أضفني لمجموعتك كمشرف\n"
         f"2. ابدأ محادثة صوتية\n"
-        f"3. استخدم `/play [أغنية]`"
+        f"3. استخدم `/play [أغنية]` أو `/play` للخيارات الذكية،\n"
+        f"   أو ارفع ملفاً صوتياً/صوتاً مسجلاً مباشرة."
     )
 
 @bot.on_message(filters.command("help"))
@@ -323,6 +499,11 @@ async def help_cmd(client, message: Message):
     await message.reply_text(
         "📚 **الأوامر:**\n\n"
         "• `/play [أغنية]` - تشغيل/إضافة\n"
+        "• يمكنك إرسال `/play` بدون اسم:\n"
+        "  - يستأنف التشغيل إن كان متوقفاً\n"
+        "  - يبدأ أول عنصر من قائمة الانتظار\n"
+        "  - أو إن رددت على رابط YouTube/ملف صوتي سيُشغَّل مباشرة\n"
+        "• ارفع ملفاً صوتياً (audio) أو رسالة صوتية (voice) للتشغيل الفوري/الإضافة\n"
         "• `/pause` - إيقاف مؤقت\n"
         "• `/resume` - استئناف\n"
         "• `/skip` - تخطي\n"
@@ -346,21 +527,118 @@ async def ping_cmd(client, message: Message):
         f"▶️ Playing: {len(currently_playing)}"
     )
 
+# /play مع دعم بدون اسم والرد على رابط/ملف
 @bot.on_message(filters.command(["play", "p"]) & (filters.group | filters.channel))
 async def play_cmd(client, message: Message):
     stats['messages'] += 1
     stats['commands'] += 1
     stats['groups'].add(message.chat.id)
 
-    if not userbot_available or not pytgcalls_available:
-        return await message.reply_text("❌ **التشغيل الفعلي غير متاح!**")
-
-    if len(message.command) < 2:
-        return await message.reply_text("❌ استخدم: `/play [اسم الأغنية]`")
-
-    query = " ".join(message.command[1:])
     chat_id = message.chat.id
 
+    if not userbot_available or not pytgcalls_available:
+        if len(message.command) < 2:
+            return await message.reply_text(
+                "❌ **التشغيل الفعلي غير متاح!**\n\n"
+                "يمكنك استخدام /play بدون اسم عبر:\n"
+                "• استئناف التشغيل الحالي إن كان متوقفاً\n"
+                "• تشغيل أول عنصر في قائمة الانتظار\n"
+                "• الرد على رابط YouTube أو على ملف صوتي ثم إرسال /play"
+            )
+        return await message.reply_text("❌ **التشغيل الفعلي غير متاح!**")
+
+    # === /play بدون اسم ===
+    if len(message.command) < 2:
+        cur = currently_playing.get(chat_id)
+        if cur and cur.get('_paused_at'):
+            try:
+                await safe_resume(chat_id)
+                dur = int(cur.get('duration') or 0)
+                started = cur.get('_started_at') or time.time()
+                paused_at = cur.get('_paused_at')
+                if dur > 0:
+                    elapsed = max(0, (paused_at or time.time()) - started)
+                    remain = max(3, dur - int(elapsed))
+                    cur['_started_at'] = time.time() - elapsed
+                    cur['_paused_at'] = None
+                    task = create_playback_timer(chat_id, cur.get('id', ''), remain + 1)
+                    set_timer(chat_id, task)
+                return await message.reply_text("▶️ **تم الاستئناف**")
+            except Exception as e:
+                logger.error(f"Resume error: {e}")
+
+        if chat_id in music_queue and music_queue[chat_id]:
+            await message.reply_text("▶️ **تشغيل أول عنصر من قائمة الانتظار...**")
+            ok = await play_next_song(chat_id)
+            if not ok:
+                return await message.reply_text("❌ حدثت مشكلة في التشغيل. تأكد من وجود محادثة صوتية نشطة.")
+            return
+
+        # لو الرد يحتوي رابط أو ملف صوتي/صوت مسجل
+        if message.reply_to_message:
+            if message.reply_to_message.audio or message.reply_to_message.voice:
+                return await enqueue_tg_media(message, message.reply_to_message)
+            link = extract_url_from_message(message.reply_to_message)
+            if link:
+                # ندفن نفس سير العمل الخاص بالرابط
+                msg = await message.reply_text("🔄 **جاري التحضير (بدون اسم)...**")
+                if not await join_chat(chat_id):
+                    return await msg.edit("❌ فشل انضمام العميل المساعد!")
+                await msg.edit("🔍 **جاري تحليل الرابط...**")
+                song_info = await download_song(link)
+                if not song_info:
+                    return await msg.edit("❌ **لم أتمكن من تحليل الرابط!**\nقد يتطلب YouTube تمرير Cookies.")
+                if chat_id not in music_queue:
+                    music_queue[chat_id] = []
+                music_queue[chat_id].append(song_info)
+                if chat_id not in currently_playing:
+                    await msg.edit("🎵 **بدء التشغيل...**")
+                    ok = await play_next_song(chat_id)
+                    if not ok:
+                        return await msg.edit("❌ فشل التشغيل. تأكد من وجود محادثة صوتية نشطة.")
+                else:
+                    return await msg.edit(
+                        f"✅ **تمت الإضافة للقائمة #{len(music_queue[chat_id])}**\n\n"
+                        f"🎵 {song_info['title']}\n"
+                        f"⏱️ {format_duration(int(song_info.get('duration') or 0))}"
+                    )
+                return
+
+        # فجرب أيضاً استخراج من نفس الرسالة (أحياناً يكتب فقط رابط)
+        link = extract_url_from_message(message)
+        if link:
+            msg = await message.reply_text("🔄 **جاري التحضير (بدون اسم)...**")
+            if not await join_chat(chat_id):
+                return await msg.edit("❌ فشل انضمام العميل المساعد!")
+            await msg.edit("🔍 **جاري تحليل الرابط...**")
+            song_info = await download_song(link)
+            if not song_info:
+                return await msg.edit("❌ **لم أتمكن من تحليل الرابط!**\nقد يتطلب YouTube تمرير Cookies.")
+            if chat_id not in music_queue:
+                music_queue[chat_id] = []
+            music_queue[chat_id].append(song_info)
+            if chat_id not in currently_playing:
+                await msg.edit("🎵 **بدء التشغيل...**")
+                ok = await play_next_song(chat_id)
+                if not ok:
+                    return await msg.edit("❌ فشل التشغيل. تأكد من وجود محادثة صوتية نشطة.")
+            else:
+                return await msg.edit(
+                    f"✅ **تمت الإضافة للقائمة #{len(music_queue[chat_id])}**\n\n"
+                    f"🎵 {song_info['title']}\n"
+                    f"⏱️ {format_duration(int(song_info.get('duration') or 0))}"
+                )
+            return
+
+        return await message.reply_text(
+            "ℹ️ يمكنك استخدام /play بدون كتابة اسم هكذا:\n"
+            "• إذا كان التشغيل متوقفاً مؤقتاً: سيتم الاستئناف تلقائياً\n"
+            "• إذا كانت هناك قائمة انتظار: سيبدأ تشغيل أول عنصر\n"
+            "• أو قم بالرد على رسالة تحتوي رابط YouTube أو ملف صوتي ثم أرسل /play"
+        )
+
+    # ====== الحالة الأصلية مع اسم/بحث ======
+    query = " ".join(message.command[1:])
     msg = await message.reply_text("🔄 جاري التحضير...")
 
     if not await join_chat(chat_id):
@@ -380,7 +658,7 @@ async def play_cmd(client, message: Message):
     if chat_id not in currently_playing:
         await msg.edit("🎵 بدء التشغيل...")
         if not await play_next_song(chat_id):
-            await msg.delete()
+            return await msg.delete()
     else:
         await msg.edit(
             f"✅ **إضافة للقائمة #{position}**\n\n"
@@ -388,13 +666,23 @@ async def play_cmd(client, message: Message):
             f"⏱️ {format_duration(int(song_info.get('duration') or 0))}"
         )
 
+@bot.on_message((filters.audio | filters.voice) & (filters.group | filters.channel))
+async def tg_audio_handler(client, message: Message):
+    """
+    دعم تشغيل/إضافة الملفات الصوتية المرفوعة (audio/voice) مباشرة.
+    """
+    stats['messages'] += 1
+    # إذا التشغيل الفعلي غير متاح، نكتفي بالإضافة للمعلومات
+    if not userbot_available or not pytgcalls_available:
+        return await message.reply_text("❌ **التشغيل الفعلي غير متاح حالياً**")
+    await enqueue_tg_media(message, message)
+
 @bot.on_message(filters.command("pause") & (filters.group | filters.channel))
 async def pause_cmd(client, message: Message):
     stats['messages'] += 1
     if not pytgcalls_available:
         return
     try:
-        # cancel timer and mark pause time
         cancel_timer(message.chat.id)
         cur = currently_playing.get(message.chat.id)
         if cur and not cur.get('_paused_at'):
@@ -411,7 +699,6 @@ async def resume_cmd(client, message: Message):
         return
     try:
         await safe_resume(message.chat.id)
-        # reschedule timer with remaining time
         cur = currently_playing.get(message.chat.id)
         if cur:
             dur = int(cur.get('duration') or 0)
@@ -424,7 +711,7 @@ async def resume_cmd(client, message: Message):
                 else:
                     elapsed = max(0, time.time() - started)
                 remain = max(3, dur - int(elapsed))
-                cur['_started_at'] = time.time() - elapsed  # adjust start base
+                cur['_started_at'] = time.time() - elapsed
                 cur['_paused_at'] = None
                 task = create_playback_timer(message.chat.id, cur.get('id', ''), remain + 1)
                 set_timer(message.chat.id, task)
@@ -513,6 +800,8 @@ async def start_web():
     app = web.Application()
     app.router.add_get('/', index)
     app.router.add_get('/health', health)
+    # خدمة الملفات الصوتية المرفوعة داخلياً
+    app.router.add_static('/files', TMP_MEDIA_DIR, show_index=False)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', PORT).start()
