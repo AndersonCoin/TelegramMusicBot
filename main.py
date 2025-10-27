@@ -8,7 +8,7 @@ from typing import Dict, List
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import UserAlreadyParticipant, ChatAdminRequired, UserNotParticipant
+from pyrogram.errors import UserAlreadyParticipant, ChatAdminRequired, UserNotParticipant, PeerIdInvalid
 from dotenv import load_dotenv
 from aiohttp import web
 import yt_dlp
@@ -28,6 +28,7 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SESSION_STRING = os.getenv("SESSION_STRING")
 PORT = int(os.getenv("PORT", 10000))
+ASSISTANT_USERNAME = os.getenv("ASSISTANT_USERNAME")  # اختياري: لعرضه في رسائل الإرشاد
 
 # مسار تخزين الوسائط المؤقتة (لملفات تيليجرام)
 TMP_MEDIA_DIR = os.getenv("TMP_MEDIA_DIR", "/tmp/tgmedia")
@@ -206,32 +207,105 @@ def format_duration(seconds):
     hours, mins = divmod(mins, 60)
     return f"{hours:02d}:{mins:02d}:{secs:02d}" if hours else f"{mins:02d}:{secs:02d}"
 
-# ========================= Auto-Join Helper =========================
-async def join_chat(chat_id: int):
+# ========================= Helpers =========================
+async def resolve_target_chat_id(chat):
+    # إذا كانت رسالة من قناة -> الهدف القناة نفسها
+    if getattr(chat, "type", None) == "channel":
+        return chat.id
+    # إن كانت مجموعة مرتبطة بقناة -> شغّل على القناة
+    linked = getattr(chat, "linked_chat", None)
+    if linked:
+        try:
+            return linked.id
+        except:
+            pass
+    return chat.id
+
+async def ensure_userbot_peer(chat_id: int) -> bool:
+    """
+    يضمن أن userbot يستطيع الوصول للدردشة (تحميل peer).
+    """
+    try:
+        await userbot.get_chat(chat_id)
+        return True
+    except PeerIdInvalid:
+        return False
+    except Exception as e:
+        logger.warning(f"ensure_userbot_peer: {e}")
+        return False
+
+async def join_chat(chat_id: int) -> bool:
+    """
+    محاولة انضمام الحساب المساعد للمجموعة/القناة حتى لو لم يكن لديه peers.
+    - يتجاوز PeerIdInvalid عند get_chat_member.
+    - يحاول عبر username إن وجد.
+    - يحاول إنشاء رابط دعوة عبر البوت (يتطلب أن يكون Admin).
+    - يتحقق من العضوية بعد كل محاولة.
+    - وإلا يرسل رسالة إرشادية لإضافة الحساب المساعد يدوياً.
+    """
     if not userbot_available:
         return False
+
     try:
+        # هل هو عضو أصلاً؟
         try:
             await userbot.get_chat_member(chat_id, "me")
             return True
-        except UserNotParticipant:
-            pass
+        except (UserNotParticipant, PeerIdInvalid):
+            pass  # أكمل المحاولة
 
-        chat = await bot.get_chat(chat_id)
+        # معلومات الدردشة عبر البوت
+        chat = None
+        try:
+            chat = await bot.get_chat(chat_id)
+        except Exception as e:
+            logger.warning(f"get_chat by bot failed: {e}")
 
-        if getattr(chat, "username", None):
+        # حاول عبر username (عام)
+        if chat and getattr(chat, "username", None):
             try:
                 await userbot.join_chat(chat.username)
+                await asyncio.sleep(0.5)
+                await userbot.get_chat_member(chat_id, "me")
+                logger.info(f"✅ UserBot joined via @{chat.username}")
                 return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"join via username failed: {e}")
 
+        # حاول عبر رابط دعوة (يتطلب Admin)
         try:
             invite_link = await bot.export_chat_invite_link(chat_id)
-            await userbot.join_chat(invite_link)
-            return True
+            try:
+                await userbot.join_chat(invite_link)
+                await asyncio.sleep(0.5)
+                await userbot.get_chat_member(chat_id, "me")
+                logger.info("✅ UserBot joined via invite link")
+                return True
+            except Exception as e:
+                logger.warning(f"join via invite failed: {e}")
+        except ChatAdminRequired:
+            logger.warning("⚠️ Bot is not admin to export invite link")
+        except Exception as e:
+            logger.warning(f"export_chat_invite_link failed: {e}")
+
+        # إرشادات للإضافة اليدوية
+        try:
+            helper = ASSISTANT_USERNAME or (await userbot.get_me()).username or "assistant_account"
         except Exception:
-            return False
+            helper = ASSISTANT_USERNAME or "assistant_account"
+
+        try:
+            await bot.send_message(
+                chat_id,
+                f"❌ لم أستطع إضافة الحساب المساعد تلقائياً.\n\n"
+                f"الرجاء إضافة الحساب المساعد يدوياً ثم أعد المحاولة:\n"
+                f"• الحساب المساعد: @{helper}\n\n"
+                f"تأكد أيضاً أن البوت Admin ليستطيع إنشاء رابط دعوة إذا كانت الدردشة خاصة."
+            )
+        except Exception:
+            pass
+
+        return False
 
     except UserAlreadyParticipant:
         return True
@@ -291,7 +365,7 @@ async def safe_resume(chat_id: int):
     if hasattr(calls, 'resume_stream'):
         return await calls.resume_stream(chat_id)
 
-# ========================= Utils =========================
+# ========================= Utils for input =========================
 def extract_url_from_message(msg) -> str | None:
     if not msg:
         return None
@@ -321,7 +395,6 @@ def guess_ext_from_mime(mime: str | None) -> str:
     return "ogg"
 
 def build_local_file_url(filename: str) -> str:
-    # يمكن الوصول داخلياً من نفس الكونتينر
     return f"http://127.0.0.1:{PORT}/files/{filename}"
 
 # ========================= Telegram media enqueue =========================
@@ -331,14 +404,12 @@ async def enqueue_tg_media(invoker_msg: Message, media_msg: Message):
     """
     chat_id = invoker_msg.chat.id
 
-    # تحديد نوع الوسيط
     tg_audio = media_msg.audio
     tg_voice = media_msg.voice
 
     if not tg_audio and not tg_voice:
         return await invoker_msg.reply_text("❌ الرسالة لا تحتوي على ملف صوتي/رسالة صوتية")
 
-    # بيانات أساسية
     if tg_audio:
         duration = int(tg_audio.duration or 0)
         title = tg_audio.title or tg_audio.file_name or "Telegram Audio"
@@ -353,21 +424,17 @@ async def enqueue_tg_media(invoker_msg: Message, media_msg: Message):
         ext = "ogg"
         file_unique_id = tg_voice.file_unique_id
 
-    # مسار واسم الملف
     filename = f"{int(time.time())}_{invoker_msg.id}_{file_unique_id}.{ext}"
     target_path = os.path.join(TMP_MEDIA_DIR, filename)
 
-    # تنزيل الملف
     try:
         await media_msg.download(file_name=target_path)
     except Exception as e:
         logger.error(f"Download tg media error: {e}")
         return await invoker_msg.reply_text("❌ فشل تنزيل الملف من تيليجرام")
 
-    # عنوان URL داخلي لخدمة الملف
     url = build_local_file_url(filename)
 
-    # بناء song_info وإضافته للقائمة
     song_info = {
         'id': file_unique_id,
         'title': title,
@@ -385,10 +452,9 @@ async def enqueue_tg_media(invoker_msg: Message, media_msg: Message):
     music_queue[chat_id].append(song_info)
     position = len(music_queue[chat_id])
 
-    # تشغيل فوري إن لم يكن هناك تشغيل
     if pytgcalls_available and (chat_id not in currently_playing):
         if not await join_chat(chat_id):
-            return await invoker_msg.reply_text("❌ فشل انضمام العميل المساعد!")
+            return await invoker_msg.reply_text("❌ فشل انضمام الحساب المساعد!")
         ok = await play_next_song(chat_id)
         if not ok:
             return await invoker_msg.reply_text("❌ فشل التشغيل. تأكد من وجود محادثة صوتية نشطة.")
@@ -419,6 +485,12 @@ async def play_next_song(chat_id: int):
         except Exception:
             pass
         return False
+
+    # تأكد من peer للمساعد
+    if userbot_available and not await ensure_userbot_peer(chat_id):
+        if not await join_chat(chat_id):
+            await bot.send_message(chat_id, "❌ لا يمكن بدء التشغيل لأن الحساب المساعد غير موجود في هذه الدردشة.")
+            return False
 
     next_song = music_queue[chat_id].pop(0)
 
@@ -509,7 +581,8 @@ async def help_cmd(client, message: Message):
         "• `/skip` - تخطي\n"
         "• `/stop` - إيقاف كامل\n"
         "• `/queue` - القائمة\n"
-        "• `/ping` - الحالة"
+        "• `/ping` - الحالة\n"
+        "• `/forcejoin <invite-link>` - انضمام المساعد عبر رابط دعوة يدوياً"
     )
 
 @bot.on_message(filters.command("ping"))
@@ -527,6 +600,36 @@ async def ping_cmd(client, message: Message):
         f"▶️ Playing: {len(currently_playing)}"
     )
 
+@bot.on_message(filters.command("forcejoin"))
+async def forcejoin_cmd(client, message: Message):
+    """
+    استخدم: /forcejoin <invite-link>
+    أو رد على رسالة تحتوي رابط دعوة ثم /forcejoin
+    """
+    if not userbot_available:
+        return await message.reply_text("❌ لا يوجد حساب مساعد مفعّل (SESSION_STRING).")
+
+    link = None
+    if len(message.command) >= 2:
+        link = message.command[1]
+    elif message.reply_to_message:
+        link = extract_url_from_message(message.reply_to_message)
+
+    if not link:
+        return await message.reply_text("❌ الاستخدام: `/forcejoin <invite-link>` أو رد على رسالة تحوي رابط الدعوة.\n")
+
+    try:
+        await userbot.join_chat(link)
+        await asyncio.sleep(0.5)
+        target_id = await resolve_target_chat_id(message.chat)
+        try:
+            await userbot.get_chat_member(target_id, "me")
+            return await message.reply_text("✅ تم انضمام الحساب المساعد بنجاح لهذه الدردشة.")
+        except Exception:
+            return await message.reply_text("ℹ️ انضم المساعد عبر الرابط. إن لم تُحل المشكلة، أعد الأمر /play بعد بدء المكالمة.")
+    except Exception as e:
+        return await message.reply_text(f"❌ فشل الانضمام عبر الرابط: {e}")
+
 # /play مع دعم بدون اسم والرد على رابط/ملف
 @bot.on_message(filters.command(["play", "p"]) & (filters.group | filters.channel))
 async def play_cmd(client, message: Message):
@@ -534,7 +637,7 @@ async def play_cmd(client, message: Message):
     stats['commands'] += 1
     stats['groups'].add(message.chat.id)
 
-    chat_id = message.chat.id
+    chat_id = await resolve_target_chat_id(message.chat)
 
     if not userbot_available or not pytgcalls_available:
         if len(message.command) < 2:
@@ -574,16 +677,14 @@ async def play_cmd(client, message: Message):
                 return await message.reply_text("❌ حدثت مشكلة في التشغيل. تأكد من وجود محادثة صوتية نشطة.")
             return
 
-        # لو الرد يحتوي رابط أو ملف صوتي/صوت مسجل
         if message.reply_to_message:
             if message.reply_to_message.audio or message.reply_to_message.voice:
                 return await enqueue_tg_media(message, message.reply_to_message)
             link = extract_url_from_message(message.reply_to_message)
             if link:
-                # ندفن نفس سير العمل الخاص بالرابط
                 msg = await message.reply_text("🔄 **جاري التحضير (بدون اسم)...**")
                 if not await join_chat(chat_id):
-                    return await msg.edit("❌ فشل انضمام العميل المساعد!")
+                    return await msg.edit("❌ فشل انضمام الحساب المساعد!")
                 await msg.edit("🔍 **جاري تحليل الرابط...**")
                 song_info = await download_song(link)
                 if not song_info:
@@ -604,12 +705,11 @@ async def play_cmd(client, message: Message):
                     )
                 return
 
-        # فجرب أيضاً استخراج من نفس الرسالة (أحياناً يكتب فقط رابط)
         link = extract_url_from_message(message)
         if link:
             msg = await message.reply_text("🔄 **جاري التحضير (بدون اسم)...**")
             if not await join_chat(chat_id):
-                return await msg.edit("❌ فشل انضمام العميل المساعد!")
+                return await msg.edit("❌ فشل انضمام الحساب المساعد!")
             await msg.edit("🔍 **جاري تحليل الرابط...**")
             song_info = await download_song(link)
             if not song_info:
@@ -642,7 +742,7 @@ async def play_cmd(client, message: Message):
     msg = await message.reply_text("🔄 جاري التحضير...")
 
     if not await join_chat(chat_id):
-        return await msg.edit("❌ فشل انضمام العميل المساعد!")
+        return await msg.edit("❌ فشل انضمام الحساب المساعد!")
 
     await msg.edit("🔍 البحث...")
     song_info = await download_song(query)
@@ -672,7 +772,6 @@ async def tg_audio_handler(client, message: Message):
     دعم تشغيل/إضافة الملفات الصوتية المرفوعة (audio/voice) مباشرة.
     """
     stats['messages'] += 1
-    # إذا التشغيل الفعلي غير متاح، نكتفي بالإضافة للمعلومات
     if not userbot_available or not pytgcalls_available:
         return await message.reply_text("❌ **التشغيل الفعلي غير متاح حالياً**")
     await enqueue_tg_media(message, message)
