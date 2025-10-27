@@ -49,7 +49,7 @@ calls = None
 
 if userbot_available:
     try:
-        from py_tgcalls import PyTgCalls
+        from pytgcalls import PyTgCalls  # ✅ صحيح
         
         calls = PyTgCalls(userbot)
         pytgcalls_available = True
