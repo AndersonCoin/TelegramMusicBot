@@ -41,6 +41,19 @@ if SESSION_STRING:
 else:
     userbot = None
 
+# ========================= Compat Patch (fix GroupcallForbidden import) =========================
+# بعض إصدارات pytgcalls تحاول import GroupcallForbidden من pyrogram.errors وهو غير موجود في Pyrogram 2.x
+try:
+    import pyrogram.errors as _p_err
+    if not hasattr(_p_err, "GroupcallForbidden"):
+        class GroupcallForbidden(_p_err.RPCError if hasattr(_p_err, "RPCError") else Exception):
+            def __init__(self, *args, **kwargs):
+                super().__init__("GroupcallForbidden")
+        _p_err.GroupcallForbidden = GroupcallForbidden
+        logger.info("🩹 Applied compat patch: pyrogram.errors.GroupcallForbidden")
+except Exception as _e:
+    logger.warning(f"Compat patch failed: {_e}")
+
 # ========================= PyTgCalls setup (version-agnostic) =========================
 pytgcalls_available = False
 calls = None
