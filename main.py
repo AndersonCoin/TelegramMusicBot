@@ -4,11 +4,18 @@ import base64
 import logging
 import asyncio
 import time
+import shutil
+import platform
+import tarfile
+import tempfile
+import stat
 from typing import Dict, List
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import UserAlreadyParticipant, ChatAdminRequired, UserNotParticipant, PeerIdInvalid
+from pyrogram.errors import (
+    UserAlreadyParticipant, ChatAdminRequired, UserNotParticipant, PeerIdInvalid
+)
 from dotenv import load_dotenv
 from aiohttp import web
 import yt_dlp
@@ -27,7 +34,7 @@ API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SESSION_STRING = os.getenv("SESSION_STRING")
-PORT = int(os.getenv("PORT", 10000))
+PORT = int(os.getenv("PORT", 8080))  # Choreo/Cloud Run عادة 8080
 ASSISTANT_USERNAME = os.getenv("ASSISTANT_USERNAME")  # اختياري: لعرضه في رسائل الإرشاد
 
 # مسار تخزين الوسائط المؤقتة (لملفات تيليجرام)
@@ -35,9 +42,13 @@ TMP_MEDIA_DIR = os.getenv("TMP_MEDIA_DIR", "/tmp/tgmedia")
 os.makedirs(TMP_MEDIA_DIR, exist_ok=True)
 
 # ========================= Clients =========================
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    raise RuntimeError("ENV missing: API_ID, API_HASH, BOT_TOKEN are required")
+
 bot = Client("bot", api_id=int(API_ID), api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 userbot_available = False
+userbot = None
 if SESSION_STRING:
     try:
         userbot = Client("userbot", api_id=int(API_ID), api_hash=API_HASH, session_string=SESSION_STRING)
@@ -47,6 +58,7 @@ if SESSION_STRING:
         logger.error(f"UserBot error: {e}")
         userbot = None
 else:
+    logger.warning("⚠️ No SESSION_STRING provided. Music playback will not be available.")
     userbot = None
 
 # ========================= Compat Patch (fix GroupcallForbidden import) =========================
@@ -61,22 +73,117 @@ try:
 except Exception as _e:
     logger.warning(f"Compat patch failed: {_e}")
 
+# ========================= FFmpeg Ensurer (Choreo/Cloud friendly) =========================
+FFMPEG_URL_DEFAULT = os.getenv(
+    "FFMPEG_STATIC_URL",
+    "https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz"
+)
+
+def _first_writable_exec_dir(candidates):
+    for d in candidates:
+        try:
+            os.makedirs(d, exist_ok=True)
+            test_file = os.path.join(d, ".perm_test")
+            with open(test_file, "w") as f:
+                f.write("ok")
+            os.chmod(test_file, 0o755)
+            os.remove(test_file)
+            return d
+        except Exception:
+            continue
+    return None
+
+async def ensure_ffmpeg():
+    ffmpeg_path = shutil.which("ffmpeg")
+    ffprobe_path = shutil.which("ffprobe")
+    if ffmpeg_path and ffprobe_path:
+        logger.info(f"✅ ffmpeg found at {ffmpeg_path}, ffprobe found at {ffprobe_path}")
+        return
+
+    candidate_dirs = [
+        "/workspace/ffbin",
+        "/home/runner/bin",
+        "/home/site/bin",
+        "/opt/bin",
+        "/tmp/ffbin",
+    ]
+    ffbin_dir = _first_writable_exec_dir(candidate_dirs)
+    if not ffbin_dir:
+        logger.warning("⚠️ No writable exec dir found; ffmpeg install skipped.")
+        return
+
+    if platform.system().lower() != "linux":
+        logger.warning("⚠️ Non-Linux platform detected. Please install ffmpeg/ffprobe manually.")
+        return
+
+    url = FFMPEG_URL_DEFAULT
+    logger.info(f"⬇️ Downloading static FFmpeg from: {url}")
+
+    tmp_dir = tempfile.mkdtemp(prefix="ffmpegdl_")
+    archive_path = os.path.join(tmp_dir, "ffmpeg.tar.xz")
+    extract_dir = os.path.join(tmp_dir, "extract")
+    os.makedirs(extract_dir, exist_ok=True)
+
+    import aiohttp
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(url, timeout=90) as resp:
+                resp.raise_for_status()
+                with open(archive_path, "wb") as f:
+                    while True:
+                        chunk = await resp.content.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+    except Exception as e:
+        logger.error(f"❌ Failed to download FFmpeg: {e}")
+        return
+
+    try:
+        with tarfile.open(archive_path, "r:xz") as tar:
+            tar.extractall(extract_dir)
+    except Exception as e:
+        logger.error(f"❌ Failed to extract FFmpeg archive: {e}")
+        return
+
+    found_ffmpeg = None
+    found_ffprobe = None
+
+    for root, dirs, files in os.walk(extract_dir):
+        if "ffmpeg" in files:
+            src = os.path.join(root, "ffmpeg")
+            dst = os.path.join(ffbin_dir, "ffmpeg")
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o755)
+            found_ffmpeg = dst
+        if "ffprobe" in files:
+            src = os.path.join(root, "ffprobe")
+            dst = os.path.join(ffbin_dir, "ffprobe")
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o755)
+            found_ffprobe = dst
+
+    if not (found_ffmpeg and found_ffprobe):
+        logger.error("❌ Failed to locate ffmpeg/ffprobe in extracted archive.")
+        return
+
+    os.environ["PATH"] = f"{ffbin_dir}:{os.environ.get('PATH', '')}"
+    logger.info(f"✅ FFmpeg ready at {shutil.which('ffmpeg')}, FFprobe at {shutil.which('ffprobe')}")
+
 # ========================= PyTgCalls setup (version-agnostic) =========================
 pytgcalls_available = False
 calls = None
-HAVE_MEDIA_STREAM = False  # هل واجهة MediaStream متاحة؟
+HAVE_MEDIA_STREAM = False
 
 if userbot_available:
     try:
         from pytgcalls import PyTgCalls
         calls = PyTgCalls(userbot)
-
         try:
             from pytgcalls.types import MediaStream, AudioQuality  # type: ignore
             HAVE_MEDIA_STREAM = True
         except Exception:
             HAVE_MEDIA_STREAM = False
-
         pytgcalls_available = True
         logger.info("✅ pytgcalls imported successfully")
     except Exception as e:
@@ -90,29 +197,19 @@ stats = {
 music_queue: Dict[int, List[Dict]] = {}
 currently_playing: Dict[int, Dict] = {}
 bot_username = None
-
-# playback timers per chat (for auto-next)
 playback_timers: Dict[int, asyncio.Task] = {}
 
 # ========================= YouTube cookies support =========================
 COOKIES_FILE_CACHED = None
 
 async def prepare_youtube_cookies() -> str | None:
-    """
-    يحضّر ملف كوكيز بصيغة Netscape في /tmp إن تم تمريره عبر المتغيرات:
-    - YT_COOKIES_B64: نص cookies.txt مُشفّر Base64
-    - YT_COOKIES: نص cookies.txt مباشرة
-    - YT_COOKIES_URL: رابط مباشر لملف cookies.txt
-    """
     global COOKIES_FILE_CACHED
     if COOKIES_FILE_CACHED:
         return COOKIES_FILE_CACHED
-
     txt = None
     b64 = os.getenv("YT_COOKIES_B64")
     raw = os.getenv("YT_COOKIES")
     url = os.getenv("YT_COOKIES_URL")
-
     try:
         if b64:
             txt = base64.b64decode(b64).decode("utf-8", "ignore")
@@ -124,7 +221,6 @@ async def prepare_youtube_cookies() -> str | None:
                 async with sess.get(url, timeout=20) as r:
                     r.raise_for_status()
                     txt = await r.text()
-
         if txt:
             path = "/tmp/yt_cookies.txt"
             with open(path, "w", encoding="utf-8") as f:
@@ -134,10 +230,9 @@ async def prepare_youtube_cookies() -> str | None:
             return path
     except Exception as e:
         logger.warning(f"⚠️ Failed to prepare cookies: {e}")
-
     return None
 
-# ========================= YouTube =========================
+# ========================= YouTube ydl_opts =========================
 ydl_opts = {
     'format': 'bestaudio/best',
     'noplaylist': True,
@@ -148,7 +243,7 @@ ydl_opts = {
     'ignoreerrors': True,
     'extractor_args': {
         'youtube': {
-            'player_client': ['android'],   # يمكنك تجربة ['ios'] أيضاً
+            'player_client': ['android'],
             'skip': ['hls_manifest_time_shift']
         }
     },
@@ -160,7 +255,6 @@ async def download_song(query: str):
     try:
         logger.info(f"🔍 Searching: {query}")
         stats['songs_searched'] += 1
-
         local_opts = dict(ydl_opts)
         cookies_path = await prepare_youtube_cookies()
         if cookies_path:
@@ -194,10 +288,7 @@ async def download_song(query: str):
             'like_count': info.get('like_count', 0)
         }
     except Exception as e:
-        msg = str(e)
-        logger.error(f"Download error: {msg}")
-        if "sign in to confirm" in msg.lower() or "cookies" in msg.lower():
-            logger.warning("YouTube requires cookies. Set YT_COOKIES or YT_COOKIES_B64.")
+        logger.error(f"Download error: {e}")
         return None
 
 def format_duration(seconds):
@@ -209,10 +300,8 @@ def format_duration(seconds):
 
 # ========================= Helpers =========================
 async def resolve_target_chat_id(chat):
-    # إذا كانت رسالة من قناة -> الهدف القناة نفسها
     if getattr(chat, "type", None) == "channel":
         return chat.id
-    # إن كانت مجموعة مرتبطة بقناة -> شغّل على القناة
     linked = getattr(chat, "linked_chat", None)
     if linked:
         try:
@@ -222,9 +311,6 @@ async def resolve_target_chat_id(chat):
     return chat.id
 
 async def ensure_userbot_peer(chat_id: int) -> bool:
-    """
-    يضمن أن userbot يستطيع الوصول للدردشة (تحميل peer).
-    """
     try:
         await userbot.get_chat(chat_id)
         return True
@@ -234,34 +320,22 @@ async def ensure_userbot_peer(chat_id: int) -> bool:
         logger.warning(f"ensure_userbot_peer: {e}")
         return False
 
-async def join_chat(chat_id: int) -> bool:
-    """
-    محاولة انضمام الحساب المساعد للمجموعة/القناة حتى لو لم يكن لديه peers.
-    - يتجاوز PeerIdInvalid عند get_chat_member.
-    - يحاول عبر username إن وجد.
-    - يحاول إنشاء رابط دعوة عبر البوت (يتطلب أن يكون Admin).
-    - يتحقق من العضوية بعد كل محاولة.
-    - وإلا يرسل رسالة إرشادية لإضافة الحساب المساعد يدوياً.
-    """
+async def join_chat(chat_id: int, invoker: Message = None) -> bool:
     if not userbot_available:
         return False
-
     try:
-        # هل هو عضو أصلاً؟
         try:
             await userbot.get_chat_member(chat_id, "me")
             return True
         except (UserNotParticipant, PeerIdInvalid):
-            pass  # أكمل المحاولة
+            pass
 
-        # معلومات الدردشة عبر البوت
         chat = None
         try:
             chat = await bot.get_chat(chat_id)
         except Exception as e:
             logger.warning(f"get_chat by bot failed: {e}")
 
-        # حاول عبر username (عام)
         if chat and getattr(chat, "username", None):
             try:
                 await userbot.join_chat(chat.username)
@@ -272,7 +346,7 @@ async def join_chat(chat_id: int) -> bool:
             except Exception as e:
                 logger.warning(f"join via username failed: {e}")
 
-        # حاول عبر رابط دعوة (يتطلب Admin)
+        # محاولة رابط دعوة
         try:
             invite_link = await bot.export_chat_invite_link(chat_id)
             try:
@@ -288,32 +362,33 @@ async def join_chat(chat_id: int) -> bool:
         except Exception as e:
             logger.warning(f"export_chat_invite_link failed: {e}")
 
-        # إرشادات للإضافة اليدوية
+        helper = None
         try:
             helper = ASSISTANT_USERNAME or (await userbot.get_me()).username or "assistant_account"
         except Exception:
             helper = ASSISTANT_USERNAME or "assistant_account"
 
-        try:
-            await bot.send_message(
-                chat_id,
+        # لا ترسل إلى الدردشة الهدف (قد لا يكون البوت عضواً)، بل رد على المنفذ إن توفر
+        if invoker:
+            await invoker.reply_text(
                 f"❌ لم أستطع إضافة الحساب المساعد تلقائياً.\n\n"
                 f"الرجاء إضافة الحساب المساعد يدوياً ثم أعد المحاولة:\n"
                 f"• الحساب المساعد: @{helper}\n\n"
-                f"تأكد أيضاً أن البوت Admin ليستطيع إنشاء رابط دعوة إذا كانت الدردشة خاصة."
+                f"أو أعطني رابط دعوة واستخدم الأمر: `/forcejoin <invite-link>`\n"
+                f"وتأكد أن هناك محادثة صوتية نشطة."
             )
-        except Exception:
-            pass
-
+        else:
+            logger.warning("Assistant join failed and no invoker to notify.")
         return False
 
     except UserAlreadyParticipant:
         return True
     except Exception as e:
         logger.error(f"Join error: {e}")
+        if invoker:
+            await invoker.reply_text(f"❌ فشل الانضمام: {e}")
         return False
 
-# ========================= Timer helpers =========================
 def cancel_timer(chat_id: int):
     t = playback_timers.pop(chat_id, None)
     if t and not t.done():
@@ -399,10 +474,7 @@ def build_local_file_url(filename: str) -> str:
 
 # ========================= Telegram media enqueue =========================
 async def enqueue_tg_media(invoker_msg: Message, media_msg: Message):
-    """
-    تنزيل ملف الصوت/الصوت المسجّل من تيليجرام، وحفظه محلياً، وخدمته عبر الويب ثم إضافته للقائمة.
-    """
-    chat_id = invoker_msg.chat.id
+    chat_id = await resolve_target_chat_id(invoker_msg.chat)
 
     tg_audio = media_msg.audio
     tg_voice = media_msg.voice
@@ -453,8 +525,8 @@ async def enqueue_tg_media(invoker_msg: Message, media_msg: Message):
     position = len(music_queue[chat_id])
 
     if pytgcalls_available and (chat_id not in currently_playing):
-        if not await join_chat(chat_id):
-            return await invoker_msg.reply_text("❌ فشل انضمام الحساب المساعد!")
+        if not await join_chat(chat_id, invoker=invoker_msg):
+            return
         ok = await play_next_song(chat_id)
         if not ok:
             return await invoker_msg.reply_text("❌ فشل التشغيل. تأكد من وجود محادثة صوتية نشطة.")
@@ -481,16 +553,17 @@ async def play_next_song(chat_id: int):
             await safe_leave(chat_id)
             if chat_id in currently_playing:
                 del currently_playing[chat_id]
-            await bot.send_message(chat_id, "📭 انتهت القائمة")
+            try:
+                await bot.send_message(chat_id, "📭 انتهت القائمة")
+            except Exception:
+                pass
         except Exception:
             pass
         return False
 
-    # تأكد من peer للمساعد
     if userbot_available and not await ensure_userbot_peer(chat_id):
-        if not await join_chat(chat_id):
-            await bot.send_message(chat_id, "❌ لا يمكن بدء التشغيل لأن الحساب المساعد غير موجود في هذه الدردشة.")
-            return False
+        # لا ترسل في الدردشة لأن البوت قد لا يراها
+        return False
 
     next_song = music_queue[chat_id].pop(0)
 
@@ -515,11 +588,14 @@ async def play_next_song(chat_id: int):
             InlineKeyboardButton("⏹️", callback_data="stop")
         ]])
 
-        await bot.send_message(
-            chat_id,
-            f"▶️ **يتم التشغيل:**\n🎵 {next_song['title']}\n⏱️ {format_duration(dur)}",
-            reply_markup=keyboard
-        )
+        try:
+            await bot.send_message(
+                chat_id,
+                f"▶️ **يتم التشغيل:**\n🎵 {next_song['title']}\n⏱️ {format_duration(dur)}",
+                reply_markup=keyboard
+            )
+        except Exception:
+            pass
         return True
 
     except Exception as e:
@@ -527,7 +603,10 @@ async def play_next_song(chat_id: int):
         logger.error(f"❌ Play error: {msg}")
 
         if "no active group call" in msg or "group_call_invalid" in msg or "groupcall" in msg:
-            await bot.send_message(chat_id, "❌ **لا توجد محادثة صوتية نشطة!**")
+            try:
+                await bot.send_message(chat_id, "❌ **لا توجد محادثة صوتية نشطة!**")
+            except Exception:
+                pass
             return False
 
         if "already" in msg or "joined" in msg or "in call" in msg or "already joined" in msg:
@@ -541,7 +620,10 @@ async def play_next_song(chat_id: int):
                 if dur > 0:
                     task = create_playback_timer(chat_id, next_song.get('id', ''), dur + 2)
                     set_timer(chat_id, task)
-                await bot.send_message(chat_id, f"▶️ **تغيير إلى:**\n🎵 {next_song['title']}")
+                try:
+                    await bot.send_message(chat_id, f"▶️ **تغيير إلى:**\n🎵 {next_song['title']}")
+                except Exception:
+                    pass
                 return True
             except Exception as e2:
                 logger.error(f"❌ Change stream error: {e2}")
@@ -559,9 +641,9 @@ async def start_cmd(client, message: Message):
         f"أنا بوت تشغيل موسيقى للقنوات والمجموعات.\n\n"
         f"**الحالة:** {'✅ التشغيل الفعلي متاح' if (userbot_available and pytgcalls_available) else '⚠️ معلومات فقط'}\n\n"
         f"**للبدء:**\n"
-        f"1. أضفني لمجموعتك كمشرف\n"
+        f"1. أضفني لمجموعتك/قناتك كمشرف\n"
         f"2. ابدأ محادثة صوتية\n"
-        f"3. استخدم `/play [أغنية]` أو `/play` للخيارات الذكية،\n"
+        f"3. استخدم `/play [أغنية]` أو `/play`،\n"
         f"   أو ارفع ملفاً صوتياً/صوتاً مسجلاً مباشرة."
     )
 
@@ -571,18 +653,18 @@ async def help_cmd(client, message: Message):
     await message.reply_text(
         "📚 **الأوامر:**\n\n"
         "• `/play [أغنية]` - تشغيل/إضافة\n"
-        "• يمكنك إرسال `/play` بدون اسم:\n"
+        "• `/play` بدون اسم:\n"
         "  - يستأنف التشغيل إن كان متوقفاً\n"
         "  - يبدأ أول عنصر من قائمة الانتظار\n"
         "  - أو إن رددت على رابط YouTube/ملف صوتي سيُشغَّل مباشرة\n"
-        "• ارفع ملفاً صوتياً (audio) أو رسالة صوتية (voice) للتشغيل الفوري/الإضافة\n"
+        "• ارفع ملفاً صوتياً (audio) أو رسالة صوتية (voice) للتشغيل/الإضافة\n"
         "• `/pause` - إيقاف مؤقت\n"
         "• `/resume` - استئناف\n"
         "• `/skip` - تخطي\n"
         "• `/stop` - إيقاف كامل\n"
         "• `/queue` - القائمة\n"
         "• `/ping` - الحالة\n"
-        "• `/forcejoin <invite-link>` - انضمام المساعد عبر رابط دعوة يدوياً"
+        "• `/forcejoin <invite-link>` - انضمام المساعد عبر رابط دعوة يدوي"
     )
 
 @bot.on_message(filters.command("ping"))
@@ -602,22 +684,15 @@ async def ping_cmd(client, message: Message):
 
 @bot.on_message(filters.command("forcejoin"))
 async def forcejoin_cmd(client, message: Message):
-    """
-    استخدم: /forcejoin <invite-link>
-    أو رد على رسالة تحتوي رابط دعوة ثم /forcejoin
-    """
     if not userbot_available:
         return await message.reply_text("❌ لا يوجد حساب مساعد مفعّل (SESSION_STRING).")
-
     link = None
     if len(message.command) >= 2:
         link = message.command[1]
     elif message.reply_to_message:
         link = extract_url_from_message(message.reply_to_message)
-
     if not link:
         return await message.reply_text("❌ الاستخدام: `/forcejoin <invite-link>` أو رد على رسالة تحوي رابط الدعوة.\n")
-
     try:
         await userbot.join_chat(link)
         await asyncio.sleep(0.5)
@@ -683,8 +758,8 @@ async def play_cmd(client, message: Message):
             link = extract_url_from_message(message.reply_to_message)
             if link:
                 msg = await message.reply_text("🔄 **جاري التحضير (بدون اسم)...**")
-                if not await join_chat(chat_id):
-                    return await msg.edit("❌ فشل انضمام الحساب المساعد!")
+                if not await join_chat(chat_id, invoker=message):
+                    return
                 await msg.edit("🔍 **جاري تحليل الرابط...**")
                 song_info = await download_song(link)
                 if not song_info:
@@ -708,8 +783,8 @@ async def play_cmd(client, message: Message):
         link = extract_url_from_message(message)
         if link:
             msg = await message.reply_text("🔄 **جاري التحضير (بدون اسم)...**")
-            if not await join_chat(chat_id):
-                return await msg.edit("❌ فشل انضمام الحساب المساعد!")
+            if not await join_chat(chat_id, invoker=message):
+                return
             await msg.edit("🔍 **جاري تحليل الرابط...**")
             song_info = await download_song(link)
             if not song_info:
@@ -741,8 +816,8 @@ async def play_cmd(client, message: Message):
     query = " ".join(message.command[1:])
     msg = await message.reply_text("🔄 جاري التحضير...")
 
-    if not await join_chat(chat_id):
-        return await msg.edit("❌ فشل انضمام الحساب المساعد!")
+    if not await join_chat(chat_id, invoker=message):
+        return
 
     await msg.edit("🔍 البحث...")
     song_info = await download_song(query)
@@ -768,9 +843,6 @@ async def play_cmd(client, message: Message):
 
 @bot.on_message((filters.audio | filters.voice) & (filters.group | filters.channel))
 async def tg_audio_handler(client, message: Message):
-    """
-    دعم تشغيل/إضافة الملفات الصوتية المرفوعة (audio/voice) مباشرة.
-    """
     stats['messages'] += 1
     if not userbot_available or not pytgcalls_available:
         return await message.reply_text("❌ **التشغيل الفعلي غير متاح حالياً**")
@@ -899,7 +971,6 @@ async def start_web():
     app = web.Application()
     app.router.add_get('/', index)
     app.router.add_get('/health', health)
-    # خدمة الملفات الصوتية المرفوعة داخلياً
     app.router.add_static('/files', TMP_MEDIA_DIR, show_index=False)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -912,6 +983,8 @@ async def main():
 
     logger.info("🎵 MUSIC BOT")
 
+    await ensure_ffmpeg()  # تأكد من ffmpeg/ffprobe
+
     await bot.start()
     me = await bot.get_me()
     bot_username = me.username
@@ -919,7 +992,11 @@ async def main():
 
     if userbot_available:
         await userbot.start()
-        logger.info(f"✅ UserBot: {(await userbot.get_me()).first_name}")
+        try:
+            me2 = await userbot.get_me()
+            logger.info(f"✅ UserBot: {me2.first_name}")
+        except Exception as e:
+            logger.warning(f"[userbot] get_me: {e}")
 
         if pytgcalls_available:
             await calls.start()
