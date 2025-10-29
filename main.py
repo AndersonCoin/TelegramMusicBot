@@ -65,10 +65,7 @@ else:
     logger.warning("⚠️ No SESSION_STRING provided. Music playback will not be available.")
     userbot = None
 
-# ✨✨✨ ✨✨✨ ✨✨✨
-# ## الجزء المضاف لإصلاح الخطأ ##
-# ✨✨✨ ✨✨✨ ✨✨✨
-# ========================= Compatibility Patch =========================
+# ========================= Compatibility Patch (Fixes GroupcallForbidden Error) =========================
 try:
     # Check if GroupcallForbidden exists, if not, create it for compatibility
     from pyrogram.errors import GroupcallForbidden
@@ -80,9 +77,6 @@ except ImportError:
     import pyrogram.errors
     pyrogram.errors.GroupcallForbidden = GroupcallForbidden
     logger.info("🩹 Applied compatibility patch for GroupcallForbidden.")
-# ✨✨✨ ✨✨✨ ✨✨✨
-# ## نهاية الجزء المضاف ##
-# ✨✨✨ ✨✨✨ ✨✨✨
 
 
 # ========================= PyTgCalls setup =========================
@@ -218,6 +212,7 @@ async def play_next_song(chat_id: int, requested_by: str = "Unknown"):
         )
         sent_message = await bot.send_photo(
             chat_id,
+            # Placeholder image URL (tennis racket)
             photo="https://telegra.ph/file/b9289a878562d2a23354c.jpg",
             caption=message_text,
             reply_markup=keyboard
@@ -229,6 +224,36 @@ async def play_next_song(chat_id: int, requested_by: str = "Unknown"):
 
 
 # ========================= Commands =========================
+
+# ✨✨✨ ✨✨✨ ✨✨✨
+# ## أمر /start و /help (تمت إضافته) ##
+# ✨✨✨ ✨✨✨ ✨✨✨
+@bot.on_message(filters.command(["start", "help"]) & (filters.group | filters.private))
+async def start_cmd(client, message: Message):
+    if message.chat.type == "private":
+        text = (
+            "👋 **أهلاً بك! أنا بوت تشغيل الموسيقى للمحادثات الصوتية.**\n\n"
+            "للبدء:\n"
+            "1. **أضفني إلى مجموعتك.**\n"
+            "2. **اجعلني مشرفًا** (مع صلاحية **إدارة المحادثات الصوتية**).\n"
+            "3. **ابدأ محادثة صوتية** في المجموعة.\n"
+            "4. استخدم الأمر `/play <اسم الأغنية>` للتشغيل.\n\n"
+            "**ملاحظة:** يجب أن يكون الحساب المساعد (Userbot) الذي استخدمته لإنشاء `SESSION_STRING` مضافاً إلى المجموعة أيضاً."
+        )
+    else:
+        text = (
+            "**استخدامات البوت:**\n"
+            "▸ `/play <اسم/رابط>`: لتشغيل أغنية أو فيديو من يوتيوب.\n"
+            "▸ `/skip`: لتخطي الأغنية الحالية.\n"
+            "▸ `/stop`: لإيقاف التشغيل ومغادرة المكالمة.\n"
+            "▸ `/pause` / `/resume`: لإيقاف/استئناف التشغيل.\n"
+            "**تذكر أن تمنحني صلاحية إدارة المحادثات الصوتية!**"
+        )
+        
+    await message.reply_text(text)
+# ✨✨✨ ✨✨✨ ✨✨✨
+
+
 @bot.on_message(filters.command(["play", "p"]) & filters.group)
 async def play_cmd(client, message: Message):
     if not userbot_available or not pytgcalls_available:
@@ -301,7 +326,11 @@ async def playback_controls_cq(client, query: CallbackQuery):
         music_queue[chat_id] = []
         await safe_leave(chat_id)
         if chat_id in currently_playing: del currently_playing[chat_id]
-        await query.message.edit_caption("⏹️ تم إيقاف التشغيل.")
+        # Edit the message caption only if it still exists
+        try:
+            await query.message.edit_caption("⏹️ تم إيقاف التشغيل.")
+        except Exception:
+            pass
         active_messages.pop(chat_id, None)
         
     elif data == "previous":
