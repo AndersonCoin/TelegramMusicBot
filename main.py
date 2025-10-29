@@ -14,7 +14,7 @@ from typing import Dict, List
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import (
-    UserAlreadyParticipant, ChatAdminRequired, UserNotParticipant, PeerIdInvalid
+    UserAlreadyParticipant, ChatAdminRequired, UserNotParticipant, PeerIdInvalid, RPCError
 )
 from dotenv import load_dotenv
 from aiohttp import web
@@ -65,7 +65,27 @@ else:
     logger.warning("⚠️ No SESSION_STRING provided. Music playback will not be available.")
     userbot = None
 
-# ========================= PyTgCalls setup (هذا هو الجزء المفقود الذي سبب الخطأ) =========================
+# ✨✨✨ ✨✨✨ ✨✨✨
+# ## الجزء المضاف لإصلاح الخطأ ##
+# ✨✨✨ ✨✨✨ ✨✨✨
+# ========================= Compatibility Patch =========================
+try:
+    # Check if GroupcallForbidden exists, if not, create it for compatibility
+    from pyrogram.errors import GroupcallForbidden
+except ImportError:
+    class GroupcallForbidden(RPCError):
+        def __init__(self, *args, **kwargs):
+            super().__init__("GroupcallForbidden")
+    # Add the newly created class to the pyrogram.errors module
+    import pyrogram.errors
+    pyrogram.errors.GroupcallForbidden = GroupcallForbidden
+    logger.info("🩹 Applied compatibility patch for GroupcallForbidden.")
+# ✨✨✨ ✨✨✨ ✨✨✨
+# ## نهاية الجزء المضاف ##
+# ✨✨✨ ✨✨✨ ✨✨✨
+
+
+# ========================= PyTgCalls setup =========================
 pytgcalls_available = False
 calls = None
 HAVE_MEDIA_STREAM = False
@@ -86,7 +106,6 @@ if userbot_available:
 
 # ========================= FFmpeg Ensurer =========================
 async def ensure_ffmpeg():
-    # (هنا الكود الخاص بـ ffmpeg، لا حاجة لتغييره)
     if shutil.which("ffmpeg"):
         logger.info("✅ ffmpeg is already available.")
         return
@@ -105,7 +124,11 @@ async def download_song(query: str):
         logger.info(f"🔍 Searching: {query}")
         def extract():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                if query.startswith(('http://', 'https://')):
+                if 'youtube.com/playlist?list=' in query:
+                     # For now, we only take the first video of a playlist to avoid complexity
+                    info = ydl.extract_info(query, download=False, process=False)['entries'][0]
+                    info = ydl.extract_info(info['url'], download=False) # Re-extract with full info
+                elif query.startswith(('http://', 'https://')):
                     info = ydl.extract_info(query, download=False)
                 else:
                     info = ydl.extract_info(f"ytsearch:{query}", download=False)['entries'][0]
@@ -128,11 +151,7 @@ def format_duration(seconds):
 
 
 # ========================= Core Playback & UI =========================
-# (هنا باقي الدوال المساعدة مثل resolve_target_chat_id, join_chat, etc.)
-# ...
-
-# دالة إنشاء الأزرار الجديدة بأسلوب الصورة
-def generate_image_style_keyboard(is_paused: bool, song_info: dict) -> InlineKeyboardMarkup:
+def generate_image_style_keyboard(is_paused: bool) -> InlineKeyboardMarkup:
     play_pause_icon = "▶️" if is_paused else "⏸️"
     play_pause_callback = "resume" if is_paused else "pause"
 
@@ -149,9 +168,13 @@ def generate_image_style_keyboard(is_paused: bool, song_info: dict) -> InlineKey
     keyboard.append([InlineKeyboardButton("乂", callback_data="close_menu")])
     return InlineKeyboardMarkup(keyboard)
 
-# باقي الدوال المساعدة (مثل safe_play, safe_leave)
+# PyTgCalls Safe Wrappers
 async def safe_play(chat_id: int, url: str):
+    if HAVE_MEDIA_STREAM:
+        from pytgcalls.types import AudioQuality, MediaStream
+        return await calls.play(chat_id, MediaStream(url, audio_parameters=AudioQuality.HIGH))
     return await calls.play(chat_id, url)
+
 async def safe_leave(chat_id: int):
     return await calls.leave_group_call(chat_id)
 async def safe_pause(chat_id: int):
@@ -161,17 +184,22 @@ async def safe_resume(chat_id: int):
 
 currently_playing: Dict[int, Dict] = {}
 music_queue: Dict[int, List[Dict]] = {}
-playback_timers: Dict[int, asyncio.Task] = {}
-
-def cancel_timer(chat_id: int):
-    t = playback_timers.pop(chat_id, None)
-    if t and not t.done(): t.cancel()
+active_messages: Dict[int, int] = {} # To store the ID of the "now playing" message
 
 async def play_next_song(chat_id: int, requested_by: str = "Unknown"):
+    # Clean up old message first
+    if old_msg_id := active_messages.pop(chat_id, None):
+        try:
+            await bot.delete_messages(chat_id, old_msg_id)
+        except Exception:
+            pass
+
     if chat_id not in music_queue or not music_queue[chat_id]:
         await safe_leave(chat_id)
         if chat_id in currently_playing: del currently_playing[chat_id]
-        await bot.send_message(chat_id, "📭 انتهت قائمة الانتظار.")
+        try:
+            await bot.send_message(chat_id, "📭 انتهت قائمة الانتظار.")
+        except: pass
         return
 
     next_song = music_queue[chat_id].pop(0)
@@ -181,37 +209,43 @@ async def play_next_song(chat_id: int, requested_by: str = "Unknown"):
         await safe_play(chat_id, next_song['url'])
         dur = int(next_song.get('duration', 0))
         
-        keyboard = generate_image_style_keyboard(is_paused=False, song_info=next_song)
+        keyboard = generate_image_style_keyboard(is_paused=False)
         message_text = (
             f"**YT sτяєαмiиg ♪**\n\n"
             f"▸ **ᴛɪᴛʟᴇ :** {next_song.get('title', 'Unknown Title')}\n"
             f"▸ **ᴅᴜʀᴀᴛɪᴏɴ :** {format_duration(dur)}\n"
             f"▸ **ʀᴇǫᴜᴇsᴛᴇᴅ ʙʏ :** {requested_by}"
         )
-        await bot.send_photo(
+        sent_message = await bot.send_photo(
             chat_id,
             photo="https://telegra.ph/file/b9289a878562d2a23354c.jpg",
             caption=message_text,
             reply_markup=keyboard
         )
+        active_messages[chat_id] = sent_message.id
     except Exception as e:
         logger.error(f"Play error: {e}")
+        await bot.send_message(chat_id, f"❌ حدث خطأ أثناء محاولة التشغيل:\n`{e}`")
+
 
 # ========================= Commands =========================
 @bot.on_message(filters.command(["play", "p"]) & filters.group)
 async def play_cmd(client, message: Message):
     if not userbot_available or not pytgcalls_available:
-        return await message.reply_text("❌ خدمة التشغيل غير مفعلة.")
+        return await message.reply_text("❌ خدمة التشغيل غير مفعلة. تأكد من صحة `SESSION_STRING`.")
     
     query = " ".join(message.command[1:])
+    if not query and message.reply_to_message:
+        query = message.reply_to_message.text or message.reply_to_message.caption
+    
     if not query:
-        return await message.reply_text("❓ يرجى تحديد اسم الأغنية. مثال: `/play Closer`")
+        return await message.reply_text("❓ يرجى تحديد اسم الأغنية أو رابطها. مثال: `/play Closer`")
 
     msg = await message.reply_text("🔄 **جاري البحث...**")
     song_info = await download_song(query)
     
     if not song_info:
-        return await msg.edit("❌ لم أجد الأغنية.")
+        return await msg.edit("❌ لم أجد الأغنية أو الرابط غير صالح.")
         
     chat_id = message.chat.id
     if chat_id not in music_queue:
@@ -221,14 +255,14 @@ async def play_cmd(client, message: Message):
     
     if chat_id not in currently_playing:
         await msg.delete()
-        # Join call logic (simplified)
         try:
             await calls.join_group_call(chat_id)
         except Exception as e:
-            logger.warning(f"Join call failed: {e}")
+            if "already joined" not in str(e).lower():
+                 logger.warning(f"Join call failed: {e}")
         await play_next_song(chat_id, message.from_user.mention)
     else:
-        await msg.edit(f"✅ **تمت الإضافة للقائمة:** {song_info['title']}")
+        await msg.edit(f"✅ **تمت الإضافة للقائمة:**\n`{song_info['title']}`")
 
 # ========================= Callback Query Handler =========================
 @bot.on_callback_query(filters.regex("^(pause|resume|skip|stop|previous|close_menu)$"))
@@ -238,6 +272,7 @@ async def playback_controls_cq(client, query: CallbackQuery):
 
     if data == "close_menu":
         await query.message.delete()
+        active_messages.pop(chat_id, None)
         return await query.answer("Menu closed.")
 
     currently_playing_song = currently_playing.get(chat_id)
@@ -247,20 +282,19 @@ async def playback_controls_cq(client, query: CallbackQuery):
         
     if data == "pause":
         await safe_pause(chat_id)
-        keyboard = generate_image_style_keyboard(is_paused=True, song_info=currently_playing_song)
+        keyboard = generate_image_style_keyboard(is_paused=True)
         await query.message.edit_reply_markup(keyboard)
         await query.answer("⏸️ تم الإيقاف المؤقت")
     
     elif data == "resume":
         await safe_resume(chat_id)
-        keyboard = generate_image_style_keyboard(is_paused=False, song_info=currently_playing_song)
+        keyboard = generate_image_style_keyboard(is_paused=False)
         await query.message.edit_reply_markup(keyboard)
         await query.answer("▶️ تم الاستئناف")
 
     elif data == "skip":
         await query.answer("⏭️ جاري التخطي...")
-        await query.message.delete()
-        await play_next_song(chat_id) # requester info is lost on skip, can be improved
+        await play_next_song(chat_id)
 
     elif data == "stop":
         await query.answer("⏹️ جاري الإيقاف...")
@@ -268,6 +302,7 @@ async def playback_controls_cq(client, query: CallbackQuery):
         await safe_leave(chat_id)
         if chat_id in currently_playing: del currently_playing[chat_id]
         await query.message.edit_caption("⏹️ تم إيقاف التشغيل.")
+        active_messages.pop(chat_id, None)
         
     elif data == "previous":
         await query.answer("⏮️ هذه الميزة قيد التطوير!", show_alert=True)
@@ -282,19 +317,17 @@ async def run_web_server():
     app.router.add_get('/', handle_root)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080)))
     await site.start()
-    logger.info(f"🌍 Web server started on port {PORT}")
+    logger.info(f"🌍 Web server started on port {os.environ.get('PORT', 8080)}")
 
 
 # ========================= Main Runner =========================
 async def main():
-    global bot_username
     logger.info("Starting clients...")
     await bot.start()
     bot_info = await bot.get_me()
-    bot_username = bot_info.username
-    logger.info(f"✅ Bot started as @{bot_username}")
+    logger.info(f"✅ Bot started as @{bot_info.username}")
     
     if userbot_available and userbot:
         await userbot.start()
@@ -303,7 +336,7 @@ async def main():
 
     if pytgcalls_available and calls:
         await calls.start()
-        logger.info("✅ Pytgcalls started")
+        logger.info("✅ Pytgcalls successfully started")
         
     await ensure_ffmpeg()
     
