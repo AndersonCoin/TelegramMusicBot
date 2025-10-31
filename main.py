@@ -298,6 +298,48 @@ def format_duration(seconds):
     hours, mins = divmod(mins, 60)
     return f"{hours:02d}:{mins:02d}:{secs:02d}" if hours else f"{mins:02d}:{secs:02d}"
 
+# ========================= Helpers (UI) =========================
+def human_time(seconds: float) -> str:
+    seconds = int(seconds)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, secs = divmod(rem, 60)
+    parts = []
+    if days: parts.append(f"{days}d")
+    if hours: parts.append(f"{hours}h")
+    if mins: parts.append(f"{mins}m")
+    parts.append(f"{secs}s")
+    return " ".join(parts)
+
+def main_menu_kb() -> InlineKeyboardMarkup:
+    rows = []
+    if bot_username:
+        rows.append([InlineKeyboardButton("➕ أضِفني إلى مجموعة", url=f"https://t.me/{bot_username}?startgroup=true")])
+    rows.append([
+        InlineKeyboardButton("📚 المساعدة", callback_data="help"),
+        InlineKeyboardButton("📋 القائمة", callback_data="queue")
+    ])
+    return InlineKeyboardMarkup(rows)
+
+def build_player_keyboard(paused: bool = False, source_url: str | None = None) -> InlineKeyboardMarkup:
+    row1 = [
+        InlineKeyboardButton("▶️" if paused else "⏸️", callback_data="resume" if paused else "pause"),
+        InlineKeyboardButton("⏭️", callback_data="skip"),
+        InlineKeyboardButton("⏹️", callback_data="stop"),
+    ]
+    row2 = [InlineKeyboardButton("📋 القائمة", callback_data="queue")]
+    if source_url:
+        row2.append(InlineKeyboardButton("🔗 المصدر", url=source_url))
+    return InlineKeyboardMarkup([row1, row2])
+
+def build_queue_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⏭️ تخطي", callback_data="skip"),
+            InlineKeyboardButton("⏹️ إيقاف", callback_data="stop"),
+        ]
+    ])
+
 # ========================= Helpers =========================
 async def resolve_target_chat_id(chat):
     if getattr(chat, "type", None) == "channel":
@@ -371,11 +413,11 @@ async def join_chat(chat_id: int, invoker: Message = None) -> bool:
         # لا ترسل إلى الدردشة الهدف (قد لا يكون البوت عضواً)، بل رد على المنفذ إن توفر
         if invoker:
             await invoker.reply_text(
-                f"❌ لم أستطع إضافة الحساب المساعد تلقائياً.\n\n"
+                f"❌ تعذّر إضافة الحساب المساعد تلقائياً.\n\n"
                 f"الرجاء إضافة الحساب المساعد يدوياً ثم أعد المحاولة:\n"
                 f"• الحساب المساعد: @{helper}\n\n"
-                f"أو أعطني رابط دعوة واستخدم الأمر: `/forcejoin <invite-link>`\n"
-                f"وتأكد أن هناك محادثة صوتية نشطة."
+                f"أو أرسل رابط دعوة واستخدم: `/forcejoin <invite-link>`\n"
+                f"وتأكد من وجود محادثة صوتية نشطة قبل التشغيل."
             )
         else:
             logger.warning("Assistant join failed and no invoker to notify.")
@@ -531,15 +573,18 @@ async def enqueue_tg_media(invoker_msg: Message, media_msg: Message):
         if not ok:
             return await invoker_msg.reply_text("❌ فشل التشغيل. تأكد من وجود محادثة صوتية نشطة.")
         return await invoker_msg.reply_text(
-            f"▶️ **يتم التشغيل الآن:**\n\n"
+            f"▶️ بدأ التشغيل الآن:\n\n"
             f"🎵 {song_info['title']}\n"
+            f"👤 {song_info['uploader']}\n"
             f"⏱️ {format_duration(duration)}"
         )
     else:
         return await invoker_msg.reply_text(
-            f"✅ **تمت الإضافة للقائمة #{position}**\n\n"
+            f"✅ تمت الإضافة إلى القائمة #{position}\n\n"
             f"🎵 {song_info['title']}\n"
-            f"⏱️ {format_duration(duration)}"
+            f"👤 {song_info['uploader']}\n"
+            f"⏱️ {format_duration(duration)}",
+            reply_markup=build_queue_keyboard()
         )
 
 # ========================= Core Playback =========================
@@ -554,7 +599,7 @@ async def play_next_song(chat_id: int):
             if chat_id in currently_playing:
                 del currently_playing[chat_id]
             try:
-                await bot.send_message(chat_id, "📭 انتهت القائمة")
+                await bot.send_message(chat_id, "📭 انتهت قائمة التشغيل")
             except Exception:
                 pass
         except Exception:
@@ -582,16 +627,18 @@ async def play_next_song(chat_id: int):
             task = create_playback_timer(chat_id, next_song.get('id', ''), dur + 2)
             set_timer(chat_id, task)
 
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("⏸️", callback_data="pause"),
-            InlineKeyboardButton("⏭️", callback_data="skip"),
-            InlineKeyboardButton("⏹️", callback_data="stop")
-        ]])
+        keyboard = build_player_keyboard(
+            paused=False,
+            source_url=(next_song.get('webpage_url') or None)
+        )
 
         try:
             await bot.send_message(
                 chat_id,
-                f"▶️ **يتم التشغيل:**\n🎵 {next_song['title']}\n⏱️ {format_duration(dur)}",
+                f"▶️ يتم التشغيل الآن\n"
+                f"🎵 {next_song['title']}\n"
+                f"👤 {next_song.get('uploader') or 'Unknown'}\n"
+                f"⏱️ {format_duration(dur)}",
                 reply_markup=keyboard
             )
         except Exception:
@@ -604,7 +651,7 @@ async def play_next_song(chat_id: int):
 
         if "no active group call" in msg or "group_call_invalid" in msg or "groupcall" in msg:
             try:
-                await bot.send_message(chat_id, "❌ **لا توجد محادثة صوتية نشطة!**")
+                await bot.send_message(chat_id, "❌ لا توجد محادثة صوتية نشطة! ابدأ مكالمة صوتية ثم أعد المحاولة.")
             except Exception:
                 pass
             return False
@@ -621,7 +668,11 @@ async def play_next_song(chat_id: int):
                     task = create_playback_timer(chat_id, next_song.get('id', ''), dur + 2)
                     set_timer(chat_id, task)
                 try:
-                    await bot.send_message(chat_id, f"▶️ **تغيير إلى:**\n🎵 {next_song['title']}")
+                    await bot.send_message(
+                        chat_id,
+                        f"▶️ تم التبديل إلى:\n🎵 {next_song['title']}",
+                        reply_markup=build_player_keyboard(False, next_song.get('webpage_url') or None)
+                    )
                 except Exception:
                     pass
                 return True
@@ -637,49 +688,53 @@ async def start_cmd(client, message: Message):
     stats['messages'] += 1
     stats['users'].add(message.from_user.id)
     await message.reply_text(
-        f"🎵 **مرحباً {message.from_user.mention}!**\n\n"
-        f"أنا بوت تشغيل موسيقى للقنوات والمجموعات.\n\n"
-        f"**الحالة:** {'✅ التشغيل الفعلي متاح' if (userbot_available and pytgcalls_available) else '⚠️ معلومات فقط'}\n\n"
-        f"**للبدء:**\n"
-        f"1. أضفني لمجموعتك/قناتك كمشرف\n"
-        f"2. ابدأ محادثة صوتية\n"
-        f"3. استخدم `/play [أغنية]` أو `/play`،\n"
-        f"   أو ارفع ملفاً صوتياً/صوتاً مسجلاً مباشرة."
+        f"🎵 أهلاً {message.from_user.mention}!\n\n"
+        f"أنا بوت لتشغيل الموسيقى في المجموعات والقنوات عبر المكالمات الصوتية.\n\n"
+        f"الحالة الحالية:\n"
+        f"• التشغيل الفعلي: {'✅ متاح' if (userbot_available and pytgcalls_available) else '⚠️ معلومات فقط'}\n\n"
+        f"للبدء:\n"
+        f"1) أضفني كمشرف في مجموعتك/قناتك\n"
+        f"2) ابدأ محادثة صوتية\n"
+        f"3) استخدم: /play اسم_أغنية أو ارفع ملفاً صوتياً مباشرة\n"
+        f"{'4) إن لزم: أضف الحساب المساعد @' + ASSISTANT_USERNAME if ASSISTANT_USERNAME else ''}",
+        reply_markup=main_menu_kb()
     )
 
 @bot.on_message(filters.command("help"))
 async def help_cmd(client, message: Message):
     stats['messages'] += 1
     await message.reply_text(
-        "📚 **الأوامر:**\n\n"
-        "• `/play [أغنية]` - تشغيل/إضافة\n"
-        "• `/play` بدون اسم:\n"
-        "  - يستأنف التشغيل إن كان متوقفاً\n"
-        "  - يبدأ أول عنصر من قائمة الانتظار\n"
-        "  - أو إن رددت على رابط YouTube/ملف صوتي سيُشغَّل مباشرة\n"
-        "• ارفع ملفاً صوتياً (audio) أو رسالة صوتية (voice) للتشغيل/الإضافة\n"
-        "• `/pause` - إيقاف مؤقت\n"
-        "• `/resume` - استئناف\n"
-        "• `/skip` - تخطي\n"
-        "• `/stop` - إيقاف كامل\n"
-        "• `/queue` - القائمة\n"
-        "• `/ping` - الحالة\n"
-        "• `/forcejoin <invite-link>` - انضمام المساعد عبر رابط دعوة يدوي"
+        "📚 الأوامر المتاحة:\n\n"
+        "• /play [أغنية|رابط] — تشغيل/إضافة للقائمة\n"
+        "• /play (بدون اسم) — استئناف أو تشغيل أول عنصر بالقائمة أو تشغيل ردّك على رابط/ملف\n"
+        "• ارفع ملف Audio/Voice — يُضاف مباشرةً ويُشغّل عند الإمكان\n\n"
+        "التحكم أثناء التشغيل:\n"
+        "• /pause — إيقاف مؤقت\n"
+        "• /resume — استئناف\n"
+        "• /skip — تخطي الحالي\n"
+        "• /stop — إيقاف كامل وإخلاء القائمة\n"
+        "• /queue — عرض القائمة الحالية\n\n"
+        "أخرى:\n"
+        "• /ping — فحص الحالة\n"
+        "• /forcejoin <invite-link> — ضمّ الحساب المساعد عبر رابط دعوة",
+        reply_markup=main_menu_kb()
     )
 
 @bot.on_message(filters.command("ping"))
 async def ping_cmd(client, message: Message):
     stats['messages'] += 1
     start = time.time()
-    msg = await message.reply_text("🏓")
+    msg = await message.reply_text("🏓 جاري القياس...")
     end = time.time()
+    uptime = human_time(time.time() - stats['start_time'])
     await msg.edit(
-        f"🏓 **Pong!**\n\n"
-        f"⚡ `{round((end-start)*1000, 2)}ms`\n"
+        "🏓 Pong!\n\n"
+        f"⚡ سرعة الاستجابة: {round((end-start)*1000, 2)}ms\n"
+        f"⏱️ وقت التشغيل: {uptime}\n"
         f"🤖 Bot: ✅\n"
         f"👤 UserBot: {'✅' if userbot_available else '❌'}\n"
         f"🎵 PyTgCalls: {'✅' if pytgcalls_available else '❌'}\n"
-        f"▶️ Playing: {len(currently_playing)}"
+        f"▶️ حالياً: {len(currently_playing)} تشغيل"
     )
 
 @bot.on_message(filters.command("forcejoin"))
@@ -692,7 +747,7 @@ async def forcejoin_cmd(client, message: Message):
     elif message.reply_to_message:
         link = extract_url_from_message(message.reply_to_message)
     if not link:
-        return await message.reply_text("❌ الاستخدام: `/forcejoin <invite-link>` أو رد على رسالة تحوي رابط الدعوة.\n")
+        return await message.reply_text("ℹ️ الاستخدام: /forcejoin <invite-link> أو رد على رسالة تحوي رابط الدعوة.")
     try:
         await userbot.join_chat(link)
         await asyncio.sleep(0.5)
@@ -701,7 +756,7 @@ async def forcejoin_cmd(client, message: Message):
             await userbot.get_chat_member(target_id, "me")
             return await message.reply_text("✅ تم انضمام الحساب المساعد بنجاح لهذه الدردشة.")
         except Exception:
-            return await message.reply_text("ℹ️ انضم المساعد عبر الرابط. إن لم تُحل المشكلة، أعد الأمر /play بعد بدء المكالمة.")
+            return await message.reply_text("ℹ️ تم الانضمام عبر الرابط. إن استمرت المشكلة، أعد /play بعد بدء المكالمة.")
     except Exception as e:
         return await message.reply_text(f"❌ فشل الانضمام عبر الرابط: {e}")
 
@@ -717,13 +772,13 @@ async def play_cmd(client, message: Message):
     if not userbot_available or not pytgcalls_available:
         if len(message.command) < 2:
             return await message.reply_text(
-                "❌ **التشغيل الفعلي غير متاح!**\n\n"
-                "يمكنك استخدام /play بدون اسم عبر:\n"
-                "• استئناف التشغيل الحالي إن كان متوقفاً\n"
+                "❌ التشغيل الفعلي غير متاح حالياً.\n\n"
+                "يمكنك استخدام /play بدون اسم كما يلي:\n"
+                "• استئناف التشغيل إن كان متوقفاً\n"
                 "• تشغيل أول عنصر في قائمة الانتظار\n"
-                "• الرد على رابط YouTube أو على ملف صوتي ثم إرسال /play"
+                "• الرد على رابط YouTube أو ملف صوتي ثم إرسال /play"
             )
-        return await message.reply_text("❌ **التشغيل الفعلي غير متاح!**")
+        return await message.reply_text("❌ التشغيل الفعلي غير متاح حالياً.")
 
     # === /play بدون اسم ===
     if len(message.command) < 2:
@@ -741,12 +796,12 @@ async def play_cmd(client, message: Message):
                     cur['_paused_at'] = None
                     task = create_playback_timer(chat_id, cur.get('id', ''), remain + 1)
                     set_timer(chat_id, task)
-                return await message.reply_text("▶️ **تم الاستئناف**")
+                return await message.reply_text("▶️ تم الاستئناف")
             except Exception as e:
                 logger.error(f"Resume error: {e}")
 
         if chat_id in music_queue and music_queue[chat_id]:
-            await message.reply_text("▶️ **تشغيل أول عنصر من قائمة الانتظار...**")
+            await message.reply_text("▶️ تشغيل أول عنصر من قائمة الانتظار...")
             ok = await play_next_song(chat_id)
             if not ok:
                 return await message.reply_text("❌ حدثت مشكلة في التشغيل. تأكد من وجود محادثة صوتية نشطة.")
@@ -757,72 +812,72 @@ async def play_cmd(client, message: Message):
                 return await enqueue_tg_media(message, message.reply_to_message)
             link = extract_url_from_message(message.reply_to_message)
             if link:
-                msg = await message.reply_text("🔄 **جاري التحضير (بدون اسم)...**")
+                msg = await message.reply_text("🔄 جارِ التحضير (بدون اسم)...")
                 if not await join_chat(chat_id, invoker=message):
                     return
-                await msg.edit("🔍 **جاري تحليل الرابط...**")
+                await msg.edit("🔍 جارِ تحليل الرابط...")
                 song_info = await download_song(link)
                 if not song_info:
-                    return await msg.edit("❌ **لم أتمكن من تحليل الرابط!**\nقد يتطلب YouTube تمرير Cookies.")
+                    return await msg.edit("❌ لم أتمكن من تحليل الرابط! قد يتطلب YouTube تمرير Cookies.")
                 if chat_id not in music_queue:
                     music_queue[chat_id] = []
                 music_queue[chat_id].append(song_info)
                 if chat_id not in currently_playing:
-                    await msg.edit("🎵 **بدء التشغيل...**")
+                    await msg.edit("🎵 بدء التشغيل...")
                     ok = await play_next_song(chat_id)
                     if not ok:
                         return await msg.edit("❌ فشل التشغيل. تأكد من وجود محادثة صوتية نشطة.")
                 else:
                     return await msg.edit(
-                        f"✅ **تمت الإضافة للقائمة #{len(music_queue[chat_id])}**\n\n"
+                        f"✅ تمت الإضافة للقائمة #{len(music_queue[chat_id])}\n\n"
                         f"🎵 {song_info['title']}\n"
-                        f"⏱️ {format_duration(int(song_info.get('duration') or 0))}"
+                        f"⏱️ {format_duration(int(song_info.get('duration') or 0))}",
                     )
                 return
 
         link = extract_url_from_message(message)
         if link:
-            msg = await message.reply_text("🔄 **جاري التحضير (بدون اسم)...**")
+            msg = await message.reply_text("🔄 جارِ التحضير (بدون اسم)...")
             if not await join_chat(chat_id, invoker=message):
                 return
-            await msg.edit("🔍 **جاري تحليل الرابط...**")
+            await msg.edit("🔍 جارِ تحليل الرابط...")
             song_info = await download_song(link)
             if not song_info:
-                return await msg.edit("❌ **لم أتمكن من تحليل الرابط!**\nقد يتطلب YouTube تمرير Cookies.")
+                return await msg.edit("❌ لم أتمكن من تحليل الرابط! قد يتطلب YouTube تمرير Cookies.")
             if chat_id not in music_queue:
                 music_queue[chat_id] = []
             music_queue[chat_id].append(song_info)
             if chat_id not in currently_playing:
-                await msg.edit("🎵 **بدء التشغيل...**")
+                await msg.edit("🎵 بدء التشغيل...")
                 ok = await play_next_song(chat_id)
                 if not ok:
                     return await msg.edit("❌ فشل التشغيل. تأكد من وجود محادثة صوتية نشطة.")
             else:
                 return await msg.edit(
-                    f"✅ **تمت الإضافة للقائمة #{len(music_queue[chat_id])}**\n\n"
+                    f"✅ تمت الإضافة للقائمة #{len(music_queue[chat_id])}\n\n"
                     f"🎵 {song_info['title']}\n"
-                    f"⏱️ {format_duration(int(song_info.get('duration') or 0))}"
+                    f"⏱️ {format_duration(int(song_info.get('duration') or 0))}",
                 )
             return
 
         return await message.reply_text(
-            "ℹ️ يمكنك استخدام /play بدون كتابة اسم هكذا:\n"
-            "• إذا كان التشغيل متوقفاً مؤقتاً: سيتم الاستئناف تلقائياً\n"
-            "• إذا كانت هناك قائمة انتظار: سيبدأ تشغيل أول عنصر\n"
-            "• أو قم بالرد على رسالة تحتوي رابط YouTube أو ملف صوتي ثم أرسل /play"
+            "ℹ️ استخدام /play بدون اسم:\n"
+            "• إن كان التشغيل متوقفاً مؤقتاً: سيتم الاستئناف\n"
+            "• إن كانت هناك قائمة انتظار: سيبدأ تشغيل أول عنصر\n"
+            "• أو قم بالرد على رابط/ملف صوتي ثم أرسل /play"
         )
 
     # ====== الحالة الأصلية مع اسم/بحث ======
     query = " ".join(message.command[1:])
-    msg = await message.reply_text("🔄 جاري التحضير...")
+    msg = await message.reply_text("🔄 جارِ التحضير...")
 
     if not await join_chat(chat_id, invoker=message):
         return
 
-    await msg.edit("🔍 البحث...")
+    await msg.edit("🔍 جارِ البحث...")
     song_info = await download_song(query)
     if not song_info:
-        return await msg.edit("❌ لم أجد الأغنية!")
+        return await msg.edit("❌ لم أجد نتيجة مناسبة!")
 
     if chat_id not in music_queue:
         music_queue[chat_id] = []
@@ -836,16 +891,16 @@ async def play_cmd(client, message: Message):
             return await msg.delete()
     else:
         await msg.edit(
-            f"✅ **إضافة للقائمة #{position}**\n\n"
+            f"✅ تمت الإضافة للقائمة #{position}\n\n"
             f"🎵 {song_info['title']}\n"
-            f"⏱️ {format_duration(int(song_info.get('duration') or 0))}"
+            f"⏱️ {format_duration(int(song_info.get('duration') or 0))}",
         )
 
 @bot.on_message((filters.audio | filters.voice) & (filters.group | filters.channel))
 async def tg_audio_handler(client, message: Message):
     stats['messages'] += 1
     if not userbot_available or not pytgcalls_available:
-        return await message.reply_text("❌ **التشغيل الفعلي غير متاح حالياً**")
+        return await message.reply_text("❌ التشغيل الفعلي غير متاح حالياً")
     await enqueue_tg_media(message, message)
 
 @bot.on_message(filters.command("pause") & (filters.group | filters.channel))
@@ -859,7 +914,7 @@ async def pause_cmd(client, message: Message):
         if cur and not cur.get('_paused_at'):
             cur['_paused_at'] = time.time()
         await safe_pause(message.chat.id)
-        await message.reply_text("⏸️ توقف مؤقت")
+        await message.reply_text("⏸️ تم الإيقاف المؤقت")
     except Exception as e:
         await message.reply_text(f"❌ {e}")
 
@@ -886,7 +941,7 @@ async def resume_cmd(client, message: Message):
                 cur['_paused_at'] = None
                 task = create_playback_timer(message.chat.id, cur.get('id', ''), remain + 1)
                 set_timer(message.chat.id, task)
-        await message.reply_text("▶️ استئناف")
+        await message.reply_text("▶️ تم الاستئناف")
     except Exception as e:
         await message.reply_text(f"❌ {e}")
 
@@ -897,7 +952,7 @@ async def skip_cmd(client, message: Message):
     if chat_id not in currently_playing:
         return await message.reply_text("❌ لا يوجد شيء لتخطيه")
     cancel_timer(chat_id)
-    await message.reply_text(f"⏭️ تخطي: {currently_playing[chat_id]['title']}")
+    await message.reply_text(f"⏭️ تم التخطي: {currently_playing[chat_id]['title']}")
     await play_next_song(chat_id)
 
 @bot.on_message(filters.command("stop") & (filters.group | filters.channel))
@@ -912,7 +967,7 @@ async def stop_cmd(client, message: Message):
             music_queue[chat_id] = []
         if chat_id in currently_playing:
             del currently_playing[chat_id]
-        await message.reply_text("⏹️ تم الإيقاف")
+        await message.reply_text("⏹️ تم الإيقاف وإفراغ القائمة")
     except Exception as e:
         await message.reply_text(f"❌ {e}")
 
@@ -924,33 +979,39 @@ async def queue_cmd(client, message: Message):
 
     if chat_id in currently_playing:
         cur = currently_playing[chat_id]
-        text += f"▶️ {cur['title']} ({format_duration(int(cur.get('duration') or 0))})\n\n"
+        text += "🎶 الآن قيد التشغيل:\n"
+        text += f"• {cur['title']} — {format_duration(int(cur.get('duration') or 0))}\n\n"
 
     if chat_id in music_queue and music_queue[chat_id]:
-        text += "📋 القائمة:\n"
+        text += "📋 قائمة الانتظار:\n"
         for i, s in enumerate(music_queue[chat_id][:10], 1):
-            text += f"{i}. {s['title']} ({format_duration(int(s.get('duration') or 0))})\n"
+            text += f"{i}. {s['title']} — {format_duration(int(s.get('duration') or 0))}\n"
 
-    await message.reply_text(text or "📭 فارغة")
+    await message.reply_text(text or "📭 القائمة فارغة", reply_markup=build_queue_keyboard())
 
 # ========================= Callback =========================
 @bot.on_callback_query()
 async def callback_handler(client, query: CallbackQuery):
     data = query.data
-    await query.answer()
-
-    if data == "help":
-        await help_cmd(client, query.message)
-    elif data == "pause":
-        await pause_cmd(client, query.message)
-    elif data == "resume":
-        await resume_cmd(client, query.message)
-    elif data == "skip":
-        await skip_cmd(client, query.message)
-    elif data == "stop":
-        await stop_cmd(client, query.message)
-    elif data == "queue":
-        await queue_cmd(client, query.message)
+    # ملاحظة: نستخدم الأوامر نفسها لتوحيد السلوك
+    try:
+        if data == "help":
+            await help_cmd(client, query.message)
+        elif data == "pause":
+            await pause_cmd(client, query.message)
+        elif data == "resume":
+            await resume_cmd(client, query.message)
+        elif data == "skip":
+            await skip_cmd(client, query.message)
+        elif data == "stop":
+            await stop_cmd(client, query.message)
+        elif data == "queue":
+            await queue_cmd(client, query.message)
+    finally:
+        try:
+            await query.answer()
+        except Exception:
+            pass
 
 # ========================= Web Server =========================
 async def health(request):
@@ -958,13 +1019,21 @@ async def health(request):
 
 async def index(request):
     html = f"""
-<html><body style="font-family:Arial;text-align:center;padding:50px;background:#667eea;color:#fff">
-<h1>🎵</h1><p style="font-size:2em">
-{'🎉 تشغيل فعلي!' if (userbot_available and pytgcalls_available) else '⚠️ معلومات فقط'}
-</p><p>Bot: @{bot_username or 'Loading'}</p>
-<p>UserBot: {'✅' if userbot_available else '❌'}</p>
-<p>PyTgCalls: {'✅' if pytgcalls_available else '❌'}</p>
-</body></html>"""
+<html>
+  <body style="font-family:Arial,Helvetica,sans-serif;text-align:center;padding:60px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff">
+    <div style="max-width:720px;margin:auto">
+      <h1 style="font-size:64px;margin:0">🎵</h1>
+      <h2 style="font-weight:700;margin:10px 0 30px">{'🎉 التشغيل الفعلي جاهز!' if (userbot_available and pytgcalls_available) else '⚠️ وضع المعلومات فقط'}</h2>
+      <p style="font-size:18px;line-height:1.6">
+        Bot: @{bot_username or 'Loading...'}<br/>
+        UserBot: {'✅' if userbot_available else '❌'} · PyTgCalls: {'✅' if pytgcalls_available else '❌'}<br/>
+        منفذ الويب: {PORT}
+      </p>
+      <p style="opacity:.9">أضف البوت إلى مجموعتك وشغّل محادثة صوتية ثم استخدم /play</p>
+    </div>
+  </body>
+</html>
+"""
     return web.Response(text=html, content_type='text/html')
 
 async def start_web():
