@@ -34,10 +34,9 @@ API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SESSION_STRING = os.getenv("SESSION_STRING")
-PORT = int(os.getenv("PORT", 8080))  # Choreo/Cloud Run عادة 8080
-ASSISTANT_USERNAME = os.getenv("ASSISTANT_USERNAME")  # اختياري: لعرضه في رسائل الإرشاد
+PORT = int(os.getenv("PORT", 8080))
+ASSISTANT_USERNAME = os.getenv("ASSISTANT_USERNAME")
 
-# مسار تخزين الوسائط المؤقتة (لملفات تيليجرام)
 TMP_MEDIA_DIR = os.getenv("TMP_MEDIA_DIR", "/tmp/tgmedia")
 os.makedirs(TMP_MEDIA_DIR, exist_ok=True)
 
@@ -61,7 +60,7 @@ else:
     logger.warning("⚠️ No SESSION_STRING provided. Music playback will not be available.")
     userbot = None
 
-# ========================= Compat Patch (fix GroupcallForbidden import) =========================
+# ========================= Compat Patch =========================
 try:
     import pyrogram.errors as _p_err
     if not hasattr(_p_err, "GroupcallForbidden"):
@@ -73,7 +72,7 @@ try:
 except Exception as _e:
     logger.warning(f"Compat patch failed: {_e}")
 
-# ========================= FFmpeg Ensurer (Choreo/Cloud friendly) =========================
+# ========================= FFmpeg Ensurer =========================
 FFMPEG_URL_DEFAULT = os.getenv(
     "FFMPEG_STATIC_URL",
     "https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz"
@@ -170,7 +169,7 @@ async def ensure_ffmpeg():
     os.environ["PATH"] = f"{ffbin_dir}:{os.environ.get('PATH', '')}"
     logger.info(f"✅ FFmpeg ready at {shutil.which('ffmpeg')}, FFprobe at {shutil.which('ffprobe')}")
 
-# ========================= PyTgCalls setup (version-agnostic) =========================
+# ========================= PyTgCalls setup =========================
 pytgcalls_available = False
 calls = None
 HAVE_MEDIA_STREAM = False
@@ -180,7 +179,7 @@ if userbot_available:
         from pytgcalls import PyTgCalls
         calls = PyTgCalls(userbot)
         try:
-            from pytgcalls.types import MediaStream, AudioQuality  # type: ignore
+            from pytgcalls.types import MediaStream, AudioQuality
             HAVE_MEDIA_STREAM = True
         except Exception:
             HAVE_MEDIA_STREAM = False
@@ -388,7 +387,6 @@ async def join_chat(chat_id: int, invoker: Message = None) -> bool:
             except Exception as e:
                 logger.warning(f"join via username failed: {e}")
 
-        # محاولة رابط دعوة
         try:
             invite_link = await bot.export_chat_invite_link(chat_id)
             try:
@@ -410,7 +408,6 @@ async def join_chat(chat_id: int, invoker: Message = None) -> bool:
         except Exception:
             helper = ASSISTANT_USERNAME or "assistant_account"
 
-        # لا ترسل إلى الدردشة الهدف (قد لا يكون البوت عضواً)، بل رد على المنفذ إن توفر
         if invoker:
             await invoker.reply_text(
                 f"❌ تعذّر إضافة الحساب المساعد تلقائياً.\n\n"
@@ -458,13 +455,13 @@ def create_playback_timer(chat_id: int, song_id: str, sleep_sec: float) -> async
 # ========================= PyTgCalls Safe Wrappers =========================
 async def safe_play(chat_id: int, url: str):
     if HAVE_MEDIA_STREAM and hasattr(globals().get('MediaStream', object), '__call__'):
-        return await calls.play(chat_id, MediaStream(url, audio_parameters=AudioQuality.HIGH))  # type: ignore
+        return await calls.play(chat_id, MediaStream(url, audio_parameters=AudioQuality.HIGH))
     return await calls.play(chat_id, url)
 
 async def safe_change_stream(chat_id: int, url: str):
     if hasattr(calls, 'change_stream'):
         if HAVE_MEDIA_STREAM and hasattr(globals().get('MediaStream', object), '__call__'):
-            return await calls.change_stream(chat_id, MediaStream(url, audio_parameters=AudioQuality.HIGH))  # type: ignore
+            return await calls.change_stream(chat_id, MediaStream(url, audio_parameters=AudioQuality.HIGH))
         return await calls.change_stream(chat_id, url)
     return await safe_play(chat_id, url)
 
@@ -514,7 +511,31 @@ def guess_ext_from_mime(mime: str | None) -> str:
 def build_local_file_url(filename: str) -> str:
     return f"http://127.0.0.1:{PORT}/files/{filename}"
 
-# ========================= Telegram media enqueue =========================
+# ========================= Cleanup old files =========================
+async def cleanup_old_media_files():
+    """Deletes media files older than 1 hour to save disk space."""
+    try:
+        current_time = time.time()
+        count = 0
+        for filename in os.listdir(TMP_MEDIA_DIR):
+            filepath = os.path.join(TMP_MEDIA_DIR, filename)
+            if os.path.isfile(filepath):
+                file_age = current_time - os.path.getmtime(filepath)
+                if file_age > 3600:  # 1 hour
+                    os.remove(filepath)
+                    count += 1
+        if count > 0:
+            logger.info(f"🗑️ Cleaned up {count} old media file(s)")
+    except Exception as e:
+        logger.warning(f"Cleanup error: {e}")
+
+async def periodic_cleanup():
+    """Runs cleanup every 30 minutes."""
+    while True:
+        await asyncio.sleep(1800)  # 30 minutes
+        await cleanup_old_media_files()
+
+# ========================= Telegram media enqueue (MODIFIED) =========================
 async def enqueue_tg_media(invoker_msg: Message, media_msg: Message):
     chat_id = await resolve_target_chat_id(invoker_msg.chat)
 
@@ -531,21 +552,61 @@ async def enqueue_tg_media(invoker_msg: Message, media_msg: Message):
         uploader = performer or (invoker_msg.from_user.first_name if invoker_msg.from_user else "Telegram")
         ext = os.path.splitext(tg_audio.file_name or "")[1].lstrip(".") or guess_ext_from_mime(tg_audio.mime_type)
         file_unique_id = tg_audio.file_unique_id
+        file_size = tg_audio.file_size
     else:
         duration = int(tg_voice.duration or 0)
         title = "Voice message"
         uploader = invoker_msg.from_user.first_name if invoker_msg.from_user else "Telegram"
         ext = "ogg"
         file_unique_id = tg_voice.file_unique_id
+        file_size = tg_voice.file_size
 
     filename = f"{int(time.time())}_{invoker_msg.id}_{file_unique_id}.{ext}"
     target_path = os.path.join(TMP_MEDIA_DIR, filename)
 
-    try:
-        await media_msg.download(file_name=target_path)
-    except Exception as e:
-        logger.error(f"Download tg media error: {e}")
-        return await invoker_msg.reply_text("❌ فشل تنزيل الملف من تيليجرام")
+    # <<< MODIFIED: Download with retry and validation >>>
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"📥 Downloading TG media (attempt {attempt}/{max_retries}): {filename}")
+            await media_msg.download(file_name=target_path)
+            
+            # Validate the downloaded file
+            if not os.path.exists(target_path):
+                raise Exception("File not found after download")
+            
+            actual_size = os.path.getsize(target_path)
+            if actual_size == 0:
+                raise Exception("Downloaded file is empty (0 bytes)")
+            
+            # Check if size matches expected (allow some tolerance)
+            if file_size and actual_size < (file_size * 0.8):
+                raise Exception(f"File incomplete: expected ~{file_size} bytes, got {actual_size} bytes")
+            
+            logger.info(f"✅ Downloaded successfully: {filename} ({actual_size} bytes)")
+            break  # Success, exit retry loop
+            
+        except Exception as e:
+            logger.error(f"❌ Download attempt {attempt} failed: {e}")
+            
+            # Clean up partial file
+            if os.path.exists(target_path):
+                try:
+                    os.remove(target_path)
+                except:
+                    pass
+            
+            # If this was the last attempt, return error
+            if attempt == max_retries:
+                return await invoker_msg.reply_text(
+                    f"❌ فشل تنزيل الملف من تيليجرام بعد {max_retries} محاولات.\n"
+                    f"السبب: {str(e)}\n\n"
+                    f"💡 جرّب مرة أخرى بعد قليل، أو استخدم رابط YouTube بدلاً من ذلك."
+                )
+            
+            # Wait before retry
+            await asyncio.sleep(2)
+    # <<< END OF MODIFIED SECTION >>>
 
     url = build_local_file_url(filename)
 
@@ -587,7 +648,7 @@ async def enqueue_tg_media(invoker_msg: Message, media_msg: Message):
             reply_markup=build_queue_keyboard()
         )
 
-# ========================= Core Playback =========================
+# ========================= Core Playback (IMPROVED LOGGING) =========================
 async def play_next_song(chat_id: int):
     if not pytgcalls_available or not calls:
         return False
@@ -607,7 +668,6 @@ async def play_next_song(chat_id: int):
         return False
 
     if userbot_available and not await ensure_userbot_peer(chat_id):
-        # لا ترسل في الدردشة لأن البوت قد لا يراها
         return False
 
     next_song = music_queue[chat_id].pop(0)
@@ -646,8 +706,8 @@ async def play_next_song(chat_id: int):
         return True
 
     except Exception as e:
-        msg = str(e).lower()
-        logger.error(f"❌ Play error: {msg}")
+        msg = str(e).lower() if e else "unknown error"
+        logger.error(f"❌ Play error: {msg}", exc_info=True)  # <<< IMPROVED: Added full traceback
 
         if "no active group call" in msg or "group_call_invalid" in msg or "groupcall" in msg:
             try:
@@ -677,7 +737,7 @@ async def play_next_song(chat_id: int):
                     pass
                 return True
             except Exception as e2:
-                logger.error(f"❌ Change stream error: {e2}")
+                logger.error(f"❌ Change stream error: {e2}", exc_info=True)
                 return await play_next_song(chat_id)
 
         return await play_next_song(chat_id)
@@ -760,7 +820,6 @@ async def forcejoin_cmd(client, message: Message):
     except Exception as e:
         return await message.reply_text(f"❌ فشل الانضمام عبر الرابط: {e}")
 
-# /play مع دعم بدون اسم والرد على رابط/ملف
 @bot.on_message(filters.command(["play", "p"]) & (filters.group | filters.channel))
 async def play_cmd(client, message: Message):
     stats['messages'] += 1
@@ -780,7 +839,6 @@ async def play_cmd(client, message: Message):
             )
         return await message.reply_text("❌ التشغيل الفعلي غير متاح حالياً.")
 
-    # === /play بدون اسم ===
     if len(message.command) < 2:
         cur = currently_playing.get(chat_id)
         if cur and cur.get('_paused_at'):
@@ -867,7 +925,6 @@ async def play_cmd(client, message: Message):
             "• أو قم بالرد على رابط/ملف صوتي ثم أرسل /play"
         )
 
-    # ====== الحالة الأصلية مع اسم/بحث ======
     query = " ".join(message.command[1:])
     msg = await message.reply_text("🔄 جارِ التحضير...")
 
@@ -993,7 +1050,6 @@ async def queue_cmd(client, message: Message):
 @bot.on_callback_query()
 async def callback_handler(client, query: CallbackQuery):
     data = query.data
-    # ملاحظة: نستخدم الأوامر نفسها لتوحيد السلوك
     try:
         if data == "help":
             await help_cmd(client, query.message)
@@ -1052,7 +1108,7 @@ async def main():
 
     logger.info("🎵 MUSIC BOT")
 
-    await ensure_ffmpeg()  # تأكد من ffmpeg/ffprobe
+    await ensure_ffmpeg()
 
     await bot.start()
     me = await bot.get_me()
@@ -1073,6 +1129,11 @@ async def main():
             logger.info("🎉 FULL PLAYBACK READY!")
 
     await start_web()
+    
+    # <<< ADDED: Start periodic cleanup task >>>
+    asyncio.create_task(periodic_cleanup())
+    logger.info("✅ Periodic cleanup task started")
+    
     logger.info("✅ READY!")
 
     await asyncio.Event().wait()
