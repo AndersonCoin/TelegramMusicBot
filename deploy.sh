@@ -9,7 +9,6 @@ sudo apt install -y git python3 python3-pip ffmpeg
 # متغيرات المشروع
 GITHUB_REPO="https://github.com/USERNAME/REPO.git"
 PROJECT_DIR="/home/$USER/mybot"
-SERVICE_NAME="mybot"
 
 # استنساخ المشروع من GitHub
 if [ -d "$PROJECT_DIR" ]; then
@@ -30,29 +29,9 @@ else
     echo "⚠️ لا يوجد ملف requirements.txt"
 fi
 
-# إنشاء ملف خدمة systemd
-SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+# تشغيل البوت باستخدام screen
+echo "🚀 تشغيل البوت داخل جلسة screen..."
+screen -dmS mybot python3 bot.py
 
-sudo bash -c "cat > $SERVICE_FILE" <<EOL
-[Unit]
-Description=Telegram Bot Service
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 $PROJECT_DIR/bot.py
-WorkingDirectory=$PROJECT_DIR
-Restart=always
-User=$USER
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
-# إعادة تحميل systemd وتفعيل الخدمة
-sudo systemctl daemon-reload
-sudo systemctl enable $SERVICE_NAME
-sudo systemctl restart $SERVICE_NAME
-
-echo "✅ تم تثبيت الخدمة وتشغيل البوت بنجاح!"
-echo "🔍 لمتابعة اللوجات: sudo journalctl -u $SERVICE_NAME -f"
+echo "✅ تم رفع وتشغيل البوت بنجاح!"
+echo "للدخول إلى الجلسة: screen -r mybot"
