@@ -7,7 +7,7 @@ sudo apt update && sudo apt upgrade -y
 sudo apt install -y git python3 python3-pip ffmpeg
 
 # متغيرات المشروع
-GITHUB_REPO="https://github.com/USERNAME/REPO.git"
+GITHUB_REPO="https://github.com/AndersonCoin/TelegramMusicBot.git"
 PROJECT_DIR="/home/$USER/mybot"
 
 # استنساخ المشروع من GitHub
